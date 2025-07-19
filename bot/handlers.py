@@ -1435,7 +1435,7 @@ async def handle_checkup_history(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("checkup_content_"), StateFilter(UserStates.survey_checkup_content))
 async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
-    """Обработка содержимого кардиочекапа (мультивыбор) - ИСПРАВЛЕННАЯ"""
+    """ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ обработка содержимого кардиочекапа"""
     await safe_answer_callback(callback)
     
     data = await state.get_data()
@@ -1455,6 +1455,7 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserStates.survey_prevention_barriers)
         return
     
+    # ТОЧНОЕ соответствие названий с клавиатурой
     content_map = {
         "checkup_content_consultation": "Консультация и осмотр врача-кардиолога / терапевта",
         "checkup_content_risk_assessment": "Оценка факторов риска сердечно-сосудистых заболеваний",
@@ -1469,7 +1470,7 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
     }
     
     if callback.data == "checkup_content_skip":
-        # ИСПРАВЛЕНИЕ: правильно обрабатываем "Не проходил(а)"
+        # Обрабатываем "Не проходил(а)"
         if "Не проходил(а)" in selected:
             selected.remove("Не проходил(а)")
         else:
@@ -1482,6 +1483,7 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
         await safe_edit_message(callback.message, callback.message.text, reply_markup=keyboard)
         return
     
+    # Обрабатываем выбор конкретного пункта
     content_option = content_map.get(callback.data)
     if content_option:
         # Если выбираем обычную опцию, убираем "Не проходил(а)"
@@ -1496,6 +1498,10 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
         await state.update_data(checkup_content_selected=selected)
         keyboard = get_checkup_content_keyboard(selected)
         await safe_edit_message(callback.message, callback.message.text, reply_markup=keyboard)
+        return
+    
+    # Если дошли сюда - неизвестный callback
+    await safe_answer_callback(callback, "Неизвестная команда", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("prevention_barriers_"), StateFilter(UserStates.survey_prevention_barriers))
@@ -2697,6 +2703,32 @@ def get_risk_explanation(risk_level: str) -> str:
     }
     return explanations.get(risk_level, "⚪ Уровень риска требует дополнительной оценки.")
 
+@router.callback_query(F.data == "continue_tests")
+async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
+    """ИСПРАВЛЕННЫЙ обработчик продолжения к меню тестов"""
+    await safe_answer_callback(callback)
+    await log_user_interaction(callback.from_user.id, "continue_to_test_menu")
+    
+    # Получаем данные из состояния для проверки пройденных тестов
+    data = await state.get_data()
+    
+    text = """📝 <b>ВЫБОР ТЕСТОВ</b>
+
+Выберите следующий тест для прохождения или завершите тестирование:"""
+    
+    # Генерируем клавиатуру с учетом пройденных тестов
+    keyboard = get_test_selection_keyboard(data)
+    
+    try:
+        # Пытаемся отредактировать сообщение
+        await safe_edit_message(callback.message, text, reply_markup=keyboard)
+    except Exception as e:
+        # Если не получается отредактировать, отправляем новое
+        logger.warning(f"Не удалось отредактировать сообщение, отправляю новое: {e}")
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    
+    # Устанавливаем состояние выбора тестов
+    await state.set_state(UserStates.test_selection)
 # ============================================================================
 # ОБРАБОТЧИК ДЛЯ НЕИЗВЕСТНЫХ СООБЩЕНИЙ (С ЗАЩИТОЙ)
 # ============================================================================
