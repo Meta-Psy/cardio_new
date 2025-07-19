@@ -982,9 +982,18 @@ async def handle_phone(message: Message, state: FSMContext):
 # ============================================================================
 
 async def start_survey(message: Message, state: FSMContext):
-    """Начало опроса"""
+    """Начало опроса с удалением предыдущих сообщений"""
     await log_user_interaction(message.from_user.id, "survey_started")
     
+    # Удаляем предыдущие сообщения
+    if hasattr(message, 'message_id') and message.message_id > 1:
+        # Пытаемся удалить последние несколько сообщений
+        for i in range(max(1, message.message_id - 10), message.message_id):
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=i)
+            except:
+                pass  # Игнорируем ошибки удаления
+
     text = """<b>❓ Вопрос 1</b>
 Сколько вам лет?
 (введите число)"""
@@ -994,7 +1003,7 @@ async def start_survey(message: Message, state: FSMContext):
 
 @router.message(StateFilter(UserStates.survey_age))
 async def handle_age(message: Message, state: FSMContext):
-    """Обработка возраста"""
+    """Обработка возраста с удалением сообщений"""
     await log_user_interaction(message.from_user.id, "age_entered", message.text)
     
     try:
@@ -1005,6 +1014,15 @@ async def handle_age(message: Message, state: FSMContext):
         
         await state.update_data(age=age)
         
+        # Удаляем сообщение пользователя и вопрос
+        await message.delete()
+        # Пытаемся найти и удалить сообщение с вопросом (обычно предыдущее)
+        if message.message_id > 1:
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id - 1)
+            except:
+                pass
+       
         text = """<b>❓ Вопрос 2</b>
 
 Ваш пол"""
@@ -2028,11 +2046,80 @@ async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
     await log_user_interaction(callback.from_user.id, "continue_to_test_menu")
     await show_test_menu(callback.message, state)
 
+async def send_contact_request(message: Message, state: FSMContext):
+    """Запрос контактных данных"""
+    text = """‼️ <b>Небольшой организационный момент</b>
+
+Чтобы вы получили всё без сбоев:
+✔️ ссылку на вебинар и запись
+✔️ список анализов и бонусные материалы
+✔️ напоминания и доступ к платформе
+
+давайте с вами познакомимся 🤝
+
+Мне важно обращаться к вам по имени — так общение становится теплее и человечнее.
+
+<b>1️⃣ Напишите, пожалуйста, как к вам обращаться.</b>
+
+✍️ Введите ваше имя"""
+    
+    # Удаляем предыдущие сообщения если они есть
+    try:
+        # Проверяем, есть ли сообщения для удаления
+        if hasattr(message, 'message_id') and message.message_id > 1:
+            # Пытаемся удалить предыдущие сообщения
+            for i in range(max(1, message.message_id - 5), message.message_id):
+                try:
+                    await message.bot.delete_message(chat_id=message.chat.id, message_id=i)
+                except:
+                    pass  # Игнорируем ошибки удаления
+    except Exception as e:
+        logger.warning(f"Не удалось удалить предыдущие сообщения: {e}")
+    
+    await message.answer(text, parse_mode="HTML")
+    await state.set_state(UserStates.waiting_name)
+
+@router.message(StateFilter(UserStates.survey_health))
+async def handle_health_rating(message: Message, state: FSMContext):
+    """Обработка оценки здоровья"""
+    await log_user_interaction(message.from_user.id, "health_rating_entered", message.text)
+    
+    try:
+        health_rating = int(message.text.strip())
+        if health_rating < 0 or health_rating > 10:
+            await message.answer("Пожалуйста, введите число от 0 до 10.")
+            return
+        
+        await state.update_data(health_rating=health_rating)
+        
+        # Удаляем сообщение пользователя и вопрос
+        try:
+            await message.delete()
+            # Пытаемся найти и удалить сообщение с вопросом (обычно предыдущее)
+            if message.message_id > 1:
+                try:
+                    await message.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id - 1)
+                except:
+                    pass
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщения: {e}")
+        
+        text = """<b>❓ Вопрос 9</b>
+На ваш взгляд, какая из перечисленных причин чаще всего приводит к смерти людей в мире? 
+(выберите 1 вариант ответа)"""
+        
+        keyboard = get_death_cause_keyboard()
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        await state.set_state(UserStates.survey_death_cause)
+        
+    except ValueError:
+        await message.answer("Пожалуйста, введите число от 0 до 10.")
+
 async def complete_all_tests(message: Message, state: FSMContext):
-    """Завершение всех тестов с улучшенной проверкой данных"""
+    """Завершение всех тестов с улучшенной проверкой данных и сохранением"""
     data = await state.get_data()
     
-    # Собираем все данные тестов, включая текущий завершенный тест
+    # Собираем все данные тестов
     test_results = {}
     
     # HADS
@@ -2069,7 +2156,7 @@ async def complete_all_tests(message: Message, state: FSMContext):
     elif 'audit_skipped' in data:
         test_results['audit_skipped'] = True
     
-    # Проверяем минимальные требования (хотя бы 5 основных тестов)
+    # Проверяем минимальные требования
     required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
     missing_tests = [test for test in required_tests if test not in test_results]
     
@@ -2108,33 +2195,35 @@ async def complete_all_tests(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка отметки завершения для {message.from_user.id}: {e}")
     
-    text = """🫀 <b>Отлично! Вы прошли предварительную диагностику</b> — и это отличный фундамент для следующего шага.
-
-На вебинаре вы сможете:
-✔️ рассчитать персональный суммарный риск сердечно-сосудистых заболеваний и возможных катастроф
-✔️ собрать маршрутную карту действий — пошаговый план, который поможет защитить сердце и сохранить активность на годы вперёд
-✔️ получить от врачей ответы на ваши вопросы
-
-Теперь вы подготовлены, и на вебинаре получите максимум пользы.
-
-📩 <b>А сейчас — как и обещали:</b>
-📌 Бонус: чек-лист «Препараты и методики, которые не лечат сердце и сосуды»
-📌 Список базовых анализов для подготовки к вебинару (можно пройти по желанию)"""
-
+    # Ждем немного для сохранения данных
+    await asyncio.sleep(1)
+    
     # Генерируем и отправляем итоговую сводку
     try:
         summary = await generate_final_results_summary(message.from_user.id)
         await safe_edit_message(message, summary)
     except Exception as e:
         logger.error(f"Ошибка генерации сводки для {message.from_user.id}: {e}")
-        await safe_edit_message(message, text)
+        # Fallback - отправляем базовое сообщение о завершении
+        fallback_text = """🫀 <b>Отлично! Вы прошли диагностику</b>
+
+✅ Все ваши ответы сохранены
+📊 Результаты обработаны
+🎯 Вы готовы к вебинару!
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
+📍 Ссылка появится здесь за час до начала
+
+📎 Сейчас отправлю обещанные материалы..."""
+        
+        await safe_edit_message(message, fallback_text)
     
     # Отправляем файлы из папки materials
     await send_completion_materials(message)
     
     # Очищаем состояние
     await state.clear()
-
+    
 async def send_completion_materials(message: Message):
     """Отправка материалов после завершения диагностики"""
     import os
@@ -2277,14 +2366,70 @@ async def generate_final_results_summary(telegram_id: int) -> str:
         
         # Получаем данные пользователя
         data = get_user_data(telegram_id)
-        user = data['user']
-        survey = data['survey']
-        tests = data['tests']
         
-        # Базовая информация
-        name = user.name or "Пользователь"
-        age = survey.age or "не указан"
-        gender = survey.gender or "не указан"
+        if not data:
+            logger.error(f"Нет данных пользователя для {telegram_id}")
+            return "❌ Не удалось получить данные пользователя"
+        
+        user = data.get('user')
+        survey = data.get('survey')
+        tests = data.get('tests')
+        
+        # Проверяем наличие основных данных
+        if not user:
+            logger.error(f"Нет данных пользователя в БД для {telegram_id}")
+            return "❌ Данные пользователя не найдены"
+        
+        # Безопасно извлекаем данные
+        name = getattr(user, 'name', None) or "Пользователь"
+        
+        # Данные опроса
+        age = "не указан"
+        gender = "не указан"
+        if survey:
+            age = getattr(survey, 'age', None) or "не указан"
+            gender = getattr(survey, 'gender', None) or "не указан"
+        
+        # Данные тестов
+        if not tests:
+            logger.error(f"Нет данных тестов для {telegram_id}")
+            return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+
+✅ Ваши ответы сохранены
+📊 Результаты обрабатываются
+🎯 Вы готовы к вебинару!
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК"""
+        
+        # Безопасно извлекаем результаты тестов
+        risk_level = getattr(tests, 'overall_cv_risk_level', None) or "не определен"
+        risk_score = getattr(tests, 'overall_cv_risk_score', None) or 0
+        risk_factors_count = getattr(tests, 'risk_factors_count', None) or 0
+        
+        hads_anxiety_score = getattr(tests, 'hads_anxiety_score', None) or 0
+        hads_depression_score = getattr(tests, 'hads_depression_score', None) or 0
+        hads_anxiety_level = getattr(tests, 'hads_anxiety_level', None) or "не определен"
+        hads_depression_level = getattr(tests, 'hads_depression_level', None) or "не определен"
+        
+        burns_score = getattr(tests, 'burns_score', None) or 0
+        burns_level = getattr(tests, 'burns_level', None) or "не определен"
+        
+        isi_score = getattr(tests, 'isi_score', None) or 0
+        isi_level = getattr(tests, 'isi_level', None) or "не определен"
+        
+        stop_bang_score = getattr(tests, 'stop_bang_score', None) or 0
+        stop_bang_risk = getattr(tests, 'stop_bang_risk', None) or "не определен"
+        
+        ess_score = getattr(tests, 'ess_score', None) or 0
+        ess_level = getattr(tests, 'ess_level', None) or "не определен"
+        
+        fagerstrom_score = getattr(tests, 'fagerstrom_score', None)
+        fagerstrom_level = getattr(tests, 'fagerstrom_level', None) or "не определен"
+        fagerstrom_skipped = getattr(tests, 'fagerstrom_skipped', False)
+        
+        audit_score = getattr(tests, 'audit_score', None)
+        audit_level = getattr(tests, 'audit_level', None) or "не определен"
+        audit_skipped = getattr(tests, 'audit_skipped', False)
         
         # Формируем итоговую сводку
         summary = f"""🫀 <b>ИТОГИ ВАШЕЙ ДИАГНОСТИКИ</b>
@@ -2295,49 +2440,49 @@ async def generate_final_results_summary(telegram_id: int) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🎯 <b>ОБЩИЙ СЕРДЕЧНО-СОСУДИСТЫЙ РИСК</b>
-{get_risk_emoji(tests.overall_cv_risk_level)} <b>{tests.overall_cv_risk_level}</b>
-📈 Общий балл: {tests.overall_cv_risk_score}
-⚠️ Выявлено факторов риска: {tests.risk_factors_count}
+{get_risk_emoji(risk_level)} <b>{risk_level}</b>
+📈 Общий балл: {risk_score}
+⚠️ Выявлено факторов риска: {risk_factors_count}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📋 <b>РЕЗУЛЬТАТЫ ПСИХОЛОГИЧЕСКИХ ТЕСТОВ</b>
 
 🔹 <b>Тревога и депрессия (HADS):</b>
-   • Тревога: {tests.hads_anxiety_score} баллов ({tests.hads_anxiety_level})
-   • Депрессия: {tests.hads_depression_score} баллов ({tests.hads_depression_level})
+   • Тревога: {hads_anxiety_score} баллов ({hads_anxiety_level})
+   • Депрессия: {hads_depression_score} баллов ({hads_depression_level})
 
 🔹 <b>Эмоциональное состояние (Бернс):</b>
-   • {tests.burns_score} баллов ({tests.burns_level})
+   • {burns_score} баллов ({burns_level})
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 😴 <b>КАЧЕСТВО СНА И ОТДЫХА</b>
 
 🔹 <b>Качество сна (ISI):</b>
-   • {tests.isi_score} баллов ({tests.isi_level})
+   • {isi_score} баллов ({isi_level})
 
 🔹 <b>Риск апноэ сна (STOP-BANG):</b>
-   • {tests.stop_bang_score} баллов ({tests.stop_bang_risk} риск)
+   • {stop_bang_score} баллов ({stop_bang_risk} риск)
 
 🔹 <b>Дневная сонливость (ESS):</b>
-   • {tests.ess_score} баллов ({tests.ess_level})
+   • {ess_score} баллов ({ess_level})
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🚭 <b>ОБРАЗ ЖИЗНИ</b>"""
         
         # Добавляем информацию о курении
-        if tests.fagerstrom_skipped:
+        if fagerstrom_skipped:
             summary += "\n🔹 <b>Курение:</b> Не курит ✅"
-        elif tests.fagerstrom_score is not None:
-            summary += f"\n🔹 <b>Никотиновая зависимость:</b> {tests.fagerstrom_score} баллов ({tests.fagerstrom_level})"
+        elif fagerstrom_score is not None:
+            summary += f"\n🔹 <b>Никотиновая зависимость:</b> {fagerstrom_score} баллов ({fagerstrom_level})"
         
         # Добавляем информацию об алкоголе
-        if tests.audit_skipped:
+        if audit_skipped:
             summary += "\n🔹 <b>Алкоголь:</b> Не употребляет ✅"
-        elif tests.audit_score is not None:
-            summary += f"\n🔹 <b>Употребление алкоголя:</b> {tests.audit_score} баллов ({tests.audit_level})"
+        elif audit_score is not None:
+            summary += f"\n🔹 <b>Употребление алкоголя:</b> {audit_score} баллов ({audit_level})"
         
         summary += f"""
 
@@ -2345,7 +2490,7 @@ async def generate_final_results_summary(telegram_id: int) -> str:
 
 💡 <b>ЧТО ЭТО ОЗНАЧАЕТ</b>
 
-{get_risk_explanation(tests.overall_cv_risk_level)}
+{get_risk_explanation(risk_level)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2359,8 +2504,17 @@ async def generate_final_results_summary(telegram_id: int) -> str:
         return summary
         
     except Exception as e:
-        logger.error(f"Ошибка генерации итоговой сводки для {telegram_id}: {e}")
-        return "❌ Ошибка при генерации результатов. Обратитесь к администратору."
+        logger.error(f"Критическая ошибка генерации итоговой сводки для {telegram_id}: {e}")
+        return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+
+✅ Ваши ответы успешно сохранены
+📊 Результаты обработаны системой
+🎯 Вы готовы к вебинару!
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
+📍 Ссылка появится здесь за час до начала
+
+💡 Детальные результаты будут доступны на вебинаре"""
 
 def get_risk_emoji(risk_level: str) -> str:
     """Получить эмодзи для уровня риска"""

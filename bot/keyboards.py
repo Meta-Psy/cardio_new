@@ -177,8 +177,11 @@ def get_checkup_content_keyboard(selected: List[str]):
         buttons.append([InlineKeyboardButton(text=prefix + text, callback_data=callback_data)])
     
     # Специальные кнопки
-    buttons.append([InlineKeyboardButton(text="Не проходил(а), пропустить вопрос", callback_data="checkup_content_skip")])
-    buttons.append([InlineKeyboardButton(text="Готово", callback_data="checkup_content_done")])
+    if not selected:  # Если ничего не выбрано, показываем кнопку "Не проходил"
+        buttons.append([InlineKeyboardButton(text="❌ Не проходил(а) кардиочекап", callback_data="checkup_content_skip")])
+    
+    # Кнопка "Готово" всегда доступна
+    buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data="checkup_content_done")])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     return keyboard

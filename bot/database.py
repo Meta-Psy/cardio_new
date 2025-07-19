@@ -493,12 +493,6 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
         try:
             current_time = datetime.now()
             
-            # Импортируем функции интерпретации
-            from surveys import (
-                calculate_hads_scores, get_risk_category, 
-                calculate_overall_cardiovascular_risk
-            )
-            
             # Обновляем пользователя
             user = db.query(User).filter(User.telegram_id == telegram_id).first()
             if user:
@@ -518,14 +512,45 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                     'cv_risk': survey.cv_risk
                 }
             
+            # Импортируем функции интерпретации с обработкой ошибок
+            try:
+                from surveys import (
+                    calculate_hads_scores, get_risk_category, 
+                    calculate_overall_cardiovascular_risk
+                )
+            except ImportError as e:
+                logger.error(f"Ошибка импорта функций из surveys: {e}")
+                # Используем простые fallback функции
+                def get_risk_category(test_type, score):
+                    return "не определено"
+                
+                def calculate_overall_cardiovascular_risk(user_data, survey_data, test_data):
+                    return {
+                        'risk_score': 0,
+                        'risk_level': 'НЕОПРЕДЕЛЕН',
+                        'factors_count': 0
+                    }
+            
             # Рассчитываем HADS scores если есть данные
             hads_anxiety_score = test_data.get('hads_anxiety_score')
             hads_depression_score = test_data.get('hads_depression_score')
             hads_total_score = test_data.get('hads_score', 0)
             
+            if hads_anxiety_score is not None and hads_depression_score is not None:
+                hads_total_score = hads_anxiety_score + hads_depression_score
+            
             # Рассчитываем общий сердечно-сосудистый риск
             user_data = {'name': user.name if user else None}
-            risk_assessment = calculate_overall_cardiovascular_risk(user_data, survey_data, test_data)
+            
+            try:
+                risk_assessment = calculate_overall_cardiovascular_risk(user_data, survey_data, test_data)
+            except Exception as e:
+                logger.error(f"Ошибка расчета риска для {telegram_id}: {e}")
+                risk_assessment = {
+                    'risk_score': 0,
+                    'risk_level': 'НЕОПРЕДЕЛЕН',
+                    'factors_count': 0
+                }
             
             # Удаляем старые результаты если есть
             old_results = db.query(TestResult).filter(TestResult.telegram_id == telegram_id).first()
@@ -614,7 +639,10 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             )
             db.add(log_entry)
             
+            # Коммитим изменения
             db.commit()
+            
+            logger.info(f"Результаты тестов успешно сохранены для пользователя {telegram_id}")
             
             # Возвращаем результаты тестов
             return {
