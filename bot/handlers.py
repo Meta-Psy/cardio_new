@@ -1606,7 +1606,7 @@ async def handle_prevention_barriers(callback: CallbackQuery, state: FSMContext)
         "prevention_barriers_time": "Нет времени",
         "prevention_barriers_knowledge": "Не знаю, с чего начать",
         "prevention_barriers_doctor": "Уже наблюдаюсь у врача",
-        "prevention_barriers_nothing": "Ничего"
+        "prevention_barriers_nothing": "Ничего не мешает"
     }
     
     barrier_option = barriers_map.get(callback.data)
@@ -2452,9 +2452,9 @@ async def send_completion_materials(message: Message):
                     filename = os.path.basename(file_path)
                     
                     if "analyses" in filename.lower() or "анализ" in filename.lower():
-                        caption = "📋 Список базовых анализов для подготовки к вебинару"
-                    elif "checklist" in filename.lower() or "чеклист" in filename.lower() or "препарат" in filename.lower():
                         caption = "📌 Бонус: чек-лист «Препараты и методики, которые не лечат сердце и сосуды»"
+                    elif "checklist" in filename.lower() or "чеклист" in filename.lower() or "препарат" in filename.lower():
+                        caption = "📋 Список базовых анализов для подготовки к вебинару"
                     elif "webinar" in filename.lower() or "вебинар" in filename.lower():
                         caption = "📋 Материалы к вебинару"
                     else:
