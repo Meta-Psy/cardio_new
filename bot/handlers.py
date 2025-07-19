@@ -2181,10 +2181,10 @@ async def handle_health_rating(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число от 0 до 10.")
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """Завершение всех тестов с ОБЯЗАТЕЛЬНЫМ сохранением всех данных"""
+    """ИСПРАВЛЕННОЕ завершение всех тестов с правильной обработкой None значений"""
     data = await state.get_data()
     
-    # Собираем ВСЕ данные тестов из состояния
+    # Собираем ВСЕ данные тестов из состояния с правильной обработкой None
     test_results = {}
     
     # HADS
@@ -2214,21 +2214,37 @@ async def complete_all_tests(message: Message, state: FSMContext):
         test_results['ess_score'] = data['ess_score']
         logger.info(f"ESS данные найдены: {test_results['ess_score']}")
     
-    # Fagerstrom
-    if 'fagerstrom_score' in data:
+    # Fagerstrom - ИСПРАВЛЕННАЯ ЛОГИКА
+    if 'fagerstrom_score' in data and data['fagerstrom_score'] is not None:
         test_results['fagerstrom_score'] = data['fagerstrom_score']
         logger.info(f"Fagerstrom данные найдены: {test_results['fagerstrom_score']}")
     elif 'fagerstrom_skipped' in data and data['fagerstrom_skipped']:
         test_results['fagerstrom_skipped'] = True
         logger.info(f"Fagerstrom пропущен")
+    elif 'completed_fagerstrom' in data:
+        # Если тест был завершен, но нет балла - значит пропущен
+        test_results['fagerstrom_skipped'] = True
+        logger.info(f"Fagerstrom завершен как пропущенный")
+    else:
+        # Если ничего не указано - автоматически пропускаем
+        test_results['fagerstrom_skipped'] = True
+        logger.info(f"Fagerstrom автоматически пропущен (не указан)")
     
-    # AUDIT
-    if 'audit_score' in data:
+    # AUDIT - ИСПРАВЛЕННАЯ ЛОГИКА
+    if 'audit_score' in data and data['audit_score'] is not None:
         test_results['audit_score'] = data['audit_score']
         logger.info(f"AUDIT данные найдены: {test_results['audit_score']}")
     elif 'audit_skipped' in data and data['audit_skipped']:
         test_results['audit_skipped'] = True
         logger.info(f"AUDIT пропущен")
+    elif 'completed_audit' in data:
+        # Если тест был завершен, но нет балла - значит пропущен
+        test_results['audit_skipped'] = True
+        logger.info(f"AUDIT завершен как пропущенный")
+    else:
+        # Если ничего не указано - автоматически пропускаем
+        test_results['audit_skipped'] = True
+        logger.info(f"AUDIT автоматически пропущен (не указан)")
     
     # КРИТИЧЕСКАЯ ПРОВЕРКА: убеждаемся, что есть минимум данных
     required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
@@ -2262,7 +2278,7 @@ async def complete_all_tests(message: Message, state: FSMContext):
         return
     
     logger.info(f"Начинаю сохранение всех результатов тестов для пользователя {message.from_user.id}")
-    logger.info(f"Данные для сохранения: {test_results}")
+    logger.info(f"ФИНАЛЬНЫЕ данные для сохранения: {test_results}")
     
     await log_user_interaction(message.from_user.id, "all_tests_completed", f"Tests: {len(test_results)}")
     
@@ -2275,15 +2291,26 @@ async def complete_all_tests(message: Message, state: FSMContext):
         logger.error(f"КРИТИЧЕСКАЯ ОШИБКА сохранения тестов для {message.from_user.id}: {e}")
         logger.error(f"Данные, которые пытались сохранить: {test_results}")
         
-        # Показываем ошибку пользователю
+        # Показываем ошибку пользователю с ИСПРАВЛЕННЫМ отображением
         error_text = f"""❌ <b>ОШИБКА СОХРАНЕНИЯ ДАННЫХ</b>
 
 Произошла ошибка при сохранении результатов тестов. 
 
-<b>Ваши данные:</b>
-{chr(10).join([f"• {key}: {value}" for key, value in test_results.items()])}
+<b>Ваши данные:</b>"""
+        
+        # Правильно отображаем данные
+        for key, value in test_results.items():
+            if value is not None:
+                error_text += f"\n• {key}: {value}"
+            else:
+                error_text += f"\n• {key}: пропущен"
+        
+        error_text += f"""
 
-Попробуйте завершить тестирование еще раз или обратитесь к администратору."""
+<b>Техническая информация:</b>
+Ошибка: {str(e)[:200]}
+
+Попробуйте завершить тестирование еще раз."""
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="test_complete")],
@@ -2326,8 +2353,16 @@ async def complete_all_tests(message: Message, state: FSMContext):
 📊 Данные обработаны и готовы для анализа
 🎯 Вы полностью готовы к вебинару!
 
-<b>Сохраненные данные:</b>
-{chr(10).join([f"• {key}: {value}" for key, value in test_results.items()])}
+<b>Сохраненные данные:</b>"""
+        
+        # Правильно отображаем сохраненные данные
+        for key, value in test_results.items():
+            if value is not None:
+                fallback_text += f"\n• {key}: {value}"
+            elif key.endswith('_skipped'):
+                fallback_text += f"\n• {key.replace('_skipped', '')}: пропущен"
+
+        fallback_text += f"""
 
 🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
 📍 Ссылка появится здесь за час до начала
@@ -2497,11 +2532,8 @@ async def generate_final_results_summary(telegram_id: int) -> str:
             logger.error(f"❌ НЕТ ДАННЫХ ПОЛЬЗОВАТЕЛЯ для {telegram_id}")
             return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-❌ <b>Внимание:</b> Произошла ошибка получения ваших данных из базы.
 
-✅ Но ваши ответы точно сохранены!
-📊 Результаты будут доступны на вебинаре
-🎯 Вы готовы к участию
+
 
 🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
 
@@ -2516,7 +2548,6 @@ async def generate_final_results_summary(telegram_id: int) -> str:
             logger.error(f"❌ ОТСУТСТВУЮТ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ в БД для {telegram_id}")
             return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-❌ <b>Ошибка:</b> Данные пользователя не найдены в системе.
 
 🔄 <b>Что делать:</b>
 • Попробуйте команду /restart

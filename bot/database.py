@@ -520,7 +520,7 @@ async def save_survey_data(telegram_id: int, state_data: Dict[str, Any]):
 
 
 async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
-    """УЛУЧШЕННОЕ сохранение результатов тестов с детальной диагностикой"""
+    """ФИНАЛЬНО ИСПРАВЛЕННОЕ сохранение результатов тестов"""
     def _save():
         db = get_db_sync()
         try:
@@ -555,13 +555,12 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             else:
                 logger.warning(f"Данные опроса не найдены для пользователя {telegram_id}")
             
-            # Импортируем функции интерпретации с обработкой ошибок
+            # Импортируем функции интерпретации
             try:
                 from surveys import get_risk_category, calculate_overall_cardiovascular_risk
                 logger.info("Функции интерпретации импортированы успешно")
             except ImportError as e:
                 logger.error(f"Ошибка импорта функций из surveys: {e}")
-                # Используем простые fallback функции
                 def get_risk_category(test_type, score):
                     return "не определено"
                 
@@ -572,19 +571,14 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                         'factors_count': 0
                     }
             
-            # Подготавливаем данные для валидации
-            logger.info("Начинаю валидацию данных тестов...")
-            
-            # Рассчитываем HADS scores если есть данные
+            # Рассчитываем HADS scores
             hads_anxiety_score = test_data.get('hads_anxiety_score')
             hads_depression_score = test_data.get('hads_depression_score')
             hads_total_score = test_data.get('hads_score', 0)
             
             if hads_anxiety_score is not None and hads_depression_score is not None:
                 hads_total_score = hads_anxiety_score + hads_depression_score
-                logger.info(f"HADS баллы рассчитаны: тревога={hads_anxiety_score}, депрессия={hads_depression_score}, общий={hads_total_score}")
-            else:
-                logger.warning(f"HADS данные неполные: тревога={hads_anxiety_score}, депрессия={hads_depression_score}")
+                logger.info(f"HADS баллы: тревога={hads_anxiety_score}, депрессия={hads_depression_score}, общий={hads_total_score}")
             
             # Рассчитываем общий сердечно-сосудистый риск
             user_data = {'name': user.name if user else None}
@@ -603,12 +597,36 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             # Удаляем старые результаты если есть
             old_results = db.query(TestResult).filter(TestResult.telegram_id == telegram_id).first()
             if old_results:
-                logger.info(f"Найдены старые результаты тестов для {telegram_id}, удаляю...")
+                logger.info(f"Удаляю старые результаты тестов для {telegram_id}")
                 db.delete(old_results)
                 db.flush()
             
-            # Создаем новые результаты с заполнением ВСЕХ колонок и детальной проверкой
-            logger.info("Создаю новую запись TestResult...")
+            # ПРАВИЛЬНАЯ ОБРАБОТКА ПРОПУЩЕННЫХ ТЕСТОВ
+            logger.info("Создаю новую запись TestResult с правильной обработкой None...")
+            
+            # Fagerstrom - правильная логика
+            fagerstrom_score = test_data.get('fagerstrom_score')
+            fagerstrom_skipped = test_data.get('fagerstrom_skipped', False)
+            fagerstrom_level = None
+            
+            if fagerstrom_score is not None:
+                fagerstrom_level = get_risk_category('fagerstrom', fagerstrom_score)
+                logger.info(f"Fagerstrom: score={fagerstrom_score}, level={fagerstrom_level}")
+            else:
+                fagerstrom_skipped = True
+                logger.info(f"Fagerstrom пропущен")
+            
+            # AUDIT - правильная логика
+            audit_score = test_data.get('audit_score')
+            audit_skipped = test_data.get('audit_skipped', False)
+            audit_level = None
+            
+            if audit_score is not None:
+                audit_level = get_risk_category('audit', audit_score)
+                logger.info(f"AUDIT: score={audit_score}, level={audit_level}")
+            else:
+                audit_skipped = True
+                logger.info(f"AUDIT пропущен")
             
             test_result = TestResult(
                 telegram_id=telegram_id,
@@ -620,31 +638,31 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                 hads_anxiety_level=get_risk_category('hads_anxiety', hads_anxiety_score) if hads_anxiety_score is not None else None,
                 hads_depression_level=get_risk_category('hads_depression', hads_depression_score) if hads_depression_score is not None else None,
                 
-                # Тест Бернса - Шкала депрессии
+                # Тест Бернса
                 burns_score=test_data.get('burns_score'),
-                burns_level=get_risk_category('burns', test_data.get('burns_score', 0)),
+                burns_level=get_risk_category('burns', test_data.get('burns_score', 0)) if test_data.get('burns_score') is not None else None,
                 
                 # ISI - Индекс тяжести бессонницы
                 isi_score=test_data.get('isi_score'),
-                isi_level=get_risk_category('isi', test_data.get('isi_score', 0)),
+                isi_level=get_risk_category('isi', test_data.get('isi_score', 0)) if test_data.get('isi_score') is not None else None,
                 
                 # STOP-BANG - Риск апноэ сна
                 stop_bang_score=test_data.get('stop_bang_score'),
-                stop_bang_risk=get_risk_category('stop_bang', test_data.get('stop_bang_score', 0)),
+                stop_bang_risk=get_risk_category('stop_bang', test_data.get('stop_bang_score', 0)) if test_data.get('stop_bang_score') is not None else None,
                 
                 # ESS - Шкала сонливости Эпворта
                 ess_score=test_data.get('ess_score'),
-                ess_level=get_risk_category('ess', test_data.get('ess_score', 0)),
+                ess_level=get_risk_category('ess', test_data.get('ess_score', 0)) if test_data.get('ess_score') is not None else None,
                 
-                # Тест Фагерстрема - Никотиновая зависимость
-                fagerstrom_score=test_data.get('fagerstrom_score'),
-                fagerstrom_level=get_risk_category('fagerstrom', test_data.get('fagerstrom_score', 0)) if test_data.get('fagerstrom_score') is not None else None,
-                fagerstrom_skipped=test_data.get('fagerstrom_skipped', False),
+                # Тест Фагерстрема - ИСПРАВЛЕННАЯ ЛОГИКА
+                fagerstrom_score=fagerstrom_score,
+                fagerstrom_level=fagerstrom_level,
+                fagerstrom_skipped=fagerstrom_skipped,
                 
-                # AUDIT - Употребление алкоголя
-                audit_score=test_data.get('audit_score'),
-                audit_level=get_risk_category('audit', test_data.get('audit_score', 0)) if test_data.get('audit_score') is not None else None,
-                audit_skipped=test_data.get('audit_skipped', False),
+                # AUDIT - ИСПРАВЛЕННАЯ ЛОГИКА
+                audit_score=audit_score,
+                audit_level=audit_level,
+                audit_skipped=audit_skipped,
                 
                 # Общая оценка риска
                 overall_cv_risk_score=risk_assessment.get('risk_score', 0),
@@ -674,7 +692,7 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             # Добавляем в сессию
             db.add(test_result)
             
-            # Логируем завершение тестов с подробной информацией
+            # Логируем завершение тестов
             log_entry = ActivityLog(
                 telegram_id=telegram_id,
                 action="tests_completed",
@@ -691,10 +709,10 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                         "isi_score": test_data.get('isi_score'),
                         "stop_bang_score": test_data.get('stop_bang_score'),
                         "ess_score": test_data.get('ess_score'),
-                        "fagerstrom_score": test_data.get('fagerstrom_score'),
-                        "fagerstrom_skipped": test_data.get('fagerstrom_skipped', False),
-                        "audit_score": test_data.get('audit_score'),
-                        "audit_skipped": test_data.get('audit_skipped', False)
+                        "fagerstrom_score": fagerstrom_score,
+                        "fagerstrom_skipped": fagerstrom_skipped,
+                        "audit_score": audit_score,
+                        "audit_skipped": audit_skipped
                     },
                     "risk_assessment": {
                         "cv_risk_level": risk_assessment.get('risk_level'),
@@ -711,22 +729,18 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             db.commit()
             logger.info("✅ COMMIT УСПЕШНО ВЫПОЛНЕН!")
             
-            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: читаем данные из базы
-            logger.info("=== ПРОВЕРКА СОХРАНЕНИЯ В БАЗЕ ===")
+            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА
             verification_query = db.query(TestResult).filter(TestResult.telegram_id == telegram_id).first()
             if verification_query:
                 logger.info(f"✅ ПОДТВЕРЖДЕНИЕ: Данные найдены в базе для пользователя {telegram_id}")
                 logger.info(f"ID записи: {verification_query.id}")
                 logger.info(f"Уровень риска: {verification_query.overall_cv_risk_level}")
-                logger.info(f"HADS тревога: {verification_query.hads_anxiety_score}")
-                logger.info(f"HADS депрессия: {verification_query.hads_depression_score}")
             else:
                 logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Данные НЕ НАЙДЕНЫ в базе после commit!")
                 raise Exception("Данные не сохранились в базе данных")
             
             logger.info(f"✅ Результаты тестов ПОЛНОСТЬЮ сохранены для пользователя {telegram_id}")
             
-            # Возвращаем результаты тестов
             return {
                 'test_result_id': test_result.id,
                 'telegram_id': test_result.telegram_id,
@@ -751,15 +765,12 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             db.rollback()
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА сохранения тестов {telegram_id}: {e}")
             logger.error(f"Входящие данные: {test_data}")
-            logger.error(f"Состояние транзакции на момент ошибки: rollback выполнен")
             raise e
         finally:
             db.close()
-            logger.info(f"=== ЗАВЕРШЕНИЕ СОХРАНЕНИЯ ТЕСТОВ ДЛЯ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
     
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _save)
-
 async def mark_user_completed(telegram_id: int):
     """Улучшенная отметка пользователя как завершившего диагностику"""
     def _mark():
