@@ -1473,7 +1473,8 @@ async def handle_prevention_barriers(callback: CallbackQuery, state: FSMContext)
         "prevention_barriers_money": "Финансовые ограничения",
         "prevention_barriers_time": "Нет времени",
         "prevention_barriers_knowledge": "Не знаю, с чего начать",
-        "prevention_barriers_doctor": "Уже наблюдаюсь у врача"
+        "prevention_barriers_doctor": "Уже наблюдаюсь у врача",
+        "prevention_barriers_nothing": "Ничего"
     }
     
     barrier_option = barriers_map.get(callback.data)
@@ -1558,15 +1559,26 @@ async def handle_health_advice(callback: CallbackQuery, state: FSMContext):
 # ============================================================================
 
 async def start_tests(message: Message, state: FSMContext):
-    """Начало прохождения тестов"""
+    """Начало прохождения тестов с защитой от потери состояния"""
     await log_user_interaction(message.from_user.id, "tests_started")
+    
+    # КРИТИЧЕСКИ ВАЖНО: НЕ очищаем состояние, а только переходим к тестам
     
     text = """Теперь пройдите психологические и медицинские тесты для более точной оценки вашего здоровья.
 
 Выберите тест для прохождения:"""
     
+    # Инициализируем пустой словарь для отслеживания пройденных тестов
+    await state.update_data(completed_tests={})
+    
     keyboard = get_test_selection_keyboard()
-    await message.answer(text, reply_markup=keyboard)
+    
+    try:
+        await safe_edit_message(message, text, reply_markup=keyboard)
+    except:
+        # Если не удается отредактировать, отправляем новое сообщение
+        await message.answer(text, reply_markup=keyboard)
+    
     await state.set_state(UserStates.test_selection)
     
 @router.callback_query(F.data.startswith("test_"), StateFilter(UserStates.test_selection))
@@ -1924,7 +1936,7 @@ async def handle_test_answer(callback: CallbackQuery, state: FSMContext):
     await show_current_question(callback.message, state)
 
 async def complete_current_test(message: Message, state: FSMContext):
-    """Завершение текущего теста с гарантированным сохранением результата"""
+    """Завершение текущего теста с отметкой о завершении"""
     data = await state.get_data()
     current_test = data['current_test']
     answers = data['test_answers']
@@ -1938,54 +1950,75 @@ async def complete_current_test(message: Message, state: FSMContext):
         from surveys import calculate_hads_scores, get_hads_interpretation
         anxiety_score, depression_score = calculate_hads_scores(answers)
         
-        # КРИТИЧЕСКИ ВАЖНО: сохраняем в состояние ВСЕ результаты HADS
         await state.update_data(
             hads_anxiety_score=anxiety_score,
             hads_depression_score=depression_score,
-            hads_score=total_score
+            hads_score=total_score,
+            completed_hads=True  # Отмечаем как завершенный
         )
         result_text = get_hads_interpretation(anxiety_score, depression_score)
         
     elif current_test == "burns":
         from surveys import get_burns_interpretation
-        await state.update_data(burns_score=total_score)
+        await state.update_data(
+            burns_score=total_score,
+            completed_burns=True
+        )
         result_text = get_burns_interpretation(total_score)
         
     elif current_test == "isi":
         from surveys import get_isi_interpretation
-        await state.update_data(isi_score=total_score)
+        await state.update_data(
+            isi_score=total_score,
+            completed_isi=True
+        )
         result_text = get_isi_interpretation(total_score)
         
     elif current_test == "stop_bang":
         from surveys import get_stop_bang_interpretation
-        await state.update_data(stop_bang_score=total_score)
+        await state.update_data(
+            stop_bang_score=total_score,
+            completed_stop_bang=True
+        )
         result_text = get_stop_bang_interpretation(total_score)
         
     elif current_test == "ess":
         from surveys import get_ess_interpretation
-        await state.update_data(ess_score=total_score)
+        await state.update_data(
+            ess_score=total_score,
+            completed_ess=True
+        )
         result_text = get_ess_interpretation(total_score)
         
     elif current_test == "fagerstrom":
         from surveys import get_fagerstrom_interpretation
-        await state.update_data(fagerstrom_score=total_score)
+        await state.update_data(
+            fagerstrom_score=total_score,
+            completed_fagerstrom=True
+        )
         result_text = get_fagerstrom_interpretation(total_score)
         
     elif current_test == "audit":
         from surveys import get_audit_interpretation
-        await state.update_data(audit_score=total_score)
+        await state.update_data(
+            audit_score=total_score,
+            completed_audit=True
+        )
         result_text = get_audit_interpretation(total_score)
     
     # Логируем завершение теста
     await log_user_interaction(message.from_user.id, f"{current_test}_completed", f"Score: {total_score}")
     
-    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: проверяем что данные действительно сохранились
+    # Проверяем сохранение данных
     updated_data = await state.get_data()
-    logger.info(f"Тест {current_test} завершен для {message.from_user.id}. Сохранены данные: {list(updated_data.keys())}")
+    logger.info(f"Тест {current_test} завершен для {message.from_user.id}. Баллы: {total_score}")
     
     text = f"✅ <b>Тест завершен!</b>\n\n<b>Ваш результат:</b> {total_score} баллов\n\n{result_text}"
     
-    keyboard = get_continue_keyboard()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Продолжить", callback_data="continue_tests")]
+    ])
+    
     await safe_edit_message(message, text, reply_markup=keyboard)
     
 @router.callback_query(F.data == "continue_tests")
@@ -2355,7 +2388,96 @@ def get_risk_explanation(risk_level: str) -> str:
 # ============================================================================
 # ОБРАБОТЧИК ДЛЯ НЕИЗВЕСТНЫХ СООБЩЕНИЙ (С ЗАЩИТОЙ)
 # ============================================================================
+@router.callback_query(F.data == "test_check_completion")
+async def check_test_completion(callback: CallbackQuery, state: FSMContext):
+    """Проверка готовности к завершению тестирования"""
+    await safe_answer_callback(callback)
+    
+    data = await state.get_data()
+    
+    # Подсчитываем завершенные тесты
+    completed_tests = []
+    
+    # Проверяем каждый тест
+    test_checks = [
+        ("hads_anxiety_score", "HADS (тревога и депрессия)"),
+        ("burns_score", "Тест Бернса"),
+        ("isi_score", "ISI (качество сна)"),
+        ("stop_bang_score", "STOP-BANG (апноэ сна)"),
+        ("ess_score", "ESS (дневная сонливость)"),
+        ("fagerstrom_score", "Фагерстрем (курение)"),
+        ("audit_score", "AUDIT (алкоголь)")
+    ]
+    
+    missing_tests = []
+    
+    for test_key, test_name in test_checks:
+        if test_key in data or f"{test_key.split('_')[0]}_skipped" in data:
+            completed_tests.append(test_name)
+        else:
+            missing_tests.append(test_name)
+    
+    if len(missing_tests) == 0:
+        # Все тесты пройдены
+        text = f"""✅ <b>Все тесты завершены!</b>
 
+Пройдено тестов: {len(completed_tests)}/7
+
+Готовы завершить диагностику?"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Завершить диагностику", callback_data="test_complete")],
+            [InlineKeyboardButton(text="🔙 Назад к тестам", callback_data="back_to_tests")]
+        ])
+        
+    elif len(missing_tests) <= 2:
+        # Почти все пройдены
+        text = f"""📊 <b>Прогресс тестирования</b>
+
+✅ Завершено: {len(completed_tests)}/7 тестов
+❌ Осталось: {len(missing_tests)} тестов
+
+<b>Не пройдены:</b>
+• {chr(10).join(missing_tests)}
+
+Можете завершить сейчас или пройти оставшиеся тесты."""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Завершить сейчас", callback_data="test_complete")],
+            [InlineKeyboardButton(text="📝 Пройти оставшиеся", callback_data="back_to_tests")]
+        ])
+        
+    else:
+        # Много тестов не пройдено
+        text = f"""⚠️ <b>Тестирование не завершено</b>
+
+✅ Завершено: {len(completed_tests)}/7 тестов
+❌ Осталось: {len(missing_tests)} тестов
+
+<b>Не пройдены:</b>
+• {chr(10).join(missing_tests)}
+
+Рекомендуется завершить все тесты для точной диагностики."""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Продолжить тестирование", callback_data="back_to_tests")]
+        ])
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard)
+
+@router.callback_query(F.data == "back_to_tests")
+async def back_to_test_selection(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору тестов"""
+    await safe_answer_callback(callback)
+    
+    data = await state.get_data()
+    
+    text = "Выберите тест для прохождения:"
+    keyboard = get_test_selection_keyboard(data)
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard)
+    await state.set_state(UserStates.test_selection)
+    
 @router.message()
 async def handle_unknown_message(message: Message, state: FSMContext):
     """Защищенный обработчик неизвестных сообщений и команд"""
