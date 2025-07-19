@@ -53,6 +53,15 @@ async def request_admin_password(message: Message, state: FSMContext):
     await message.answer(text, parse_mode="HTML")
     await state.set_state(AdminStates.waiting_password)
 
+async def request_admin_password(message: Message, state: FSMContext):
+    """Запрос пароля для доступа к админке"""
+    text = """🔐 <b>Доступ к административной панели</b>
+
+Введите пароль администратора:"""
+    
+    await message.answer(text, parse_mode="HTML")
+    await state.set_state(AdminStates.waiting_password)
+
 @admin_router.message(AdminStates.waiting_password)
 async def handle_admin_password(message: Message, state: FSMContext, is_admin: bool = False):
     """Обработка пароля администратора"""
@@ -73,7 +82,6 @@ async def handle_admin_password(message: Message, state: FSMContext, is_admin: b
         # Сохраняем состояние авторизации
         await state.update_data(admin_authenticated=True)
         
-        
         text = "✅ Пароль верный! Добро пожаловать в админ-панель."
         sent_message = await message.answer(text)
         
@@ -82,8 +90,24 @@ async def handle_admin_password(message: Message, state: FSMContext, is_admin: b
         await asyncio.sleep(2)
         await show_admin_panel(sent_message)
     else:
+        
         await message.answer("❌ Неверный пароль. Попробуйте снова.")
-        await request_admin_password(message, state)
+
+async def check_admin_auth(callback: CallbackQuery, state: FSMContext, is_admin: bool) -> bool:
+    """Проверка авторизации администратора БЕЗ очистки состояния"""
+    if not is_admin:
+        await callback.answer("❌ Нет прав доступа", show_alert=True)
+        return False
+
+    # Проверяем состояние авторизации
+    admin_session = await state.get_data()
+    if not admin_session.get('admin_authenticated'):
+        await callback.answer("❌ Необходимо повторно ввести пароль", show_alert=True)
+        # Перенаправляем на авторизацию
+        await request_admin_password(callback.message, state)
+        return False
+
+    return True
     
 async def show_admin_panel(message: Message):
     """Показать административную панель"""
