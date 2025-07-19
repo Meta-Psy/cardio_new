@@ -279,96 +279,129 @@ def get_db_sync():
 # ============================================================================
 
 async def save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
-    """Улучшенное сохранение данных пользователя с полным заполнением колонок"""
+    """УЛУЧШЕННОЕ сохранение данных пользователя с принудительным созданием записи"""
     def _save():
         db = get_db_sync()
         try:
-            user = db.query(User).filter(User.telegram_id == telegram_id).first()
             current_time = datetime.now()
+            
+            logger.info(f"=== НАЧАЛО СОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
+            logger.info(f"Входящие данные: name='{name}', email='{email}', phone='{phone}'")
+            
+            # Ищем существующего пользователя
+            user = db.query(User).filter(User.telegram_id == telegram_id).first()
             
             if user:
                 # Обновляем существующего пользователя
+                logger.info(f"Найден существующий пользователь с ID {user.id}")
+                
                 if name is not None:
                     user.name = name
+                    logger.info(f"Обновлено имя: {name}")
                 if email is not None:
                     user.email = email
+                    logger.info(f"Обновлен email: {email}")
                 if phone is not None:
                     user.phone = phone
+                    logger.info(f"Обновлен телефон: {phone}")
                 
                 user.updated_at = current_time
                 user.last_activity = current_time
                 
                 # Проверяем завершение регистрации
-                if user.name and user.email and user.phone:
-                    user.registration_completed = True
-                
-                # Логируем обновление данных
-                log_entry = ActivityLog(
-                    telegram_id=telegram_id,
-                    action="user_data_updated",
-                    details=json.dumps({
-                        "updated_fields": {
-                            "name": name is not None,
-                            "email": email is not None, 
-                            "phone": phone is not None
-                        },
-                        "registration_completed": user.registration_completed
-                    }, ensure_ascii=False),
-                    step="data_update"
-                )
-                db.add(log_entry)
+                registration_completed = bool(user.name and user.email and user.phone)
+                user.registration_completed = registration_completed
+                logger.info(f"Статус регистрации: {registration_completed}")
                 
             else:
-                # Создаем нового пользователя с заполнением всех полей
+                # Создаем нового пользователя
+                logger.info(f"Создаю нового пользователя для telegram_id {telegram_id}")
+                
+                registration_completed = bool(name and email and phone)
+                
                 user = User(
                     telegram_id=telegram_id,
                     name=name,
                     email=email,
                     phone=phone,
                     completed_diagnostic=False,
-                    registration_completed=bool(name and email and phone),
+                    registration_completed=registration_completed,
                     survey_completed=False,
                     tests_completed=False,
                     created_at=current_time,
                     updated_at=current_time,
                     last_activity=current_time
                 )
-                db.add(user)
                 
-                # Логируем регистрацию нового пользователя
-                log_entry = ActivityLog(
-                    telegram_id=telegram_id,
-                    action="user_registered",
-                    details=json.dumps({
-                        "name": name,
-                        "email": email,
-                        "phone": phone,
-                        "registration_completed": user.registration_completed,
-                        "timestamp": current_time.isoformat()
-                    }, ensure_ascii=False),
-                    step="registration"
-                )
-                db.add(log_entry)
+                db.add(user)
+                logger.info(f"Новый пользователь добавлен в сессию с данными:")
+                logger.info(f"  telegram_id: {user.telegram_id}")
+                logger.info(f"  name: {user.name}")
+                logger.info(f"  email: {user.email}")
+                logger.info(f"  phone: {user.phone}")
+                logger.info(f"  registration_completed: {user.registration_completed}")
             
+            # Логируем действие пользователя
+            log_entry = ActivityLog(
+                telegram_id=telegram_id,
+                action="user_registered" if not user.id else "user_data_updated",
+                details=json.dumps({
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "registration_completed": user.registration_completed,
+                    "timestamp": current_time.isoformat(),
+                    "is_new_user": not bool(user.id)
+                }, ensure_ascii=False),
+                step="registration" if not user.id else "data_update"
+            )
+            db.add(log_entry)
+            
+            # КРИТИЧЕСКИ ВАЖНО: Выполняем commit
+            logger.info("Выполняю commit для сохранения пользователя...")
             db.commit()
+            logger.info("✅ COMMIT УСПЕШНО ВЫПОЛНЕН для пользователя!")
+            
+            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: читаем пользователя из базы после commit
+            logger.info("=== ВЕРИФИКАЦИЯ СОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЯ ===")
+            verification_user = db.query(User).filter(User.telegram_id == telegram_id).first()
+            
+            if verification_user:
+                logger.info(f"✅ ПОДТВЕРЖДЕНИЕ: Пользователь найден в базе")
+                logger.info(f"  ID в базе: {verification_user.id}")
+                logger.info(f"  Telegram ID: {verification_user.telegram_id}")
+                logger.info(f"  Имя: {verification_user.name}")
+                logger.info(f"  Email: {verification_user.email}")
+                logger.info(f"  Телефон: {verification_user.phone}")
+                logger.info(f"  Регистрация завершена: {verification_user.registration_completed}")
+                logger.info(f"  Дата создания: {verification_user.created_at}")
+            else:
+                logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Пользователь НЕ НАЙДЕН после commit!")
+                raise Exception("Пользователь не сохранился в базу данных")
             
             # Возвращаем данные пользователя
-            return {
-                'user_id': user.id,
-                'telegram_id': user.telegram_id,
-                'name': user.name,
-                'email': user.email,
-                'phone': user.phone,
-                'registration_completed': user.registration_completed,
-                'created_at': user.created_at.isoformat() if user.created_at else None
+            result = {
+                'user_id': verification_user.id,
+                'telegram_id': verification_user.telegram_id,
+                'name': verification_user.name,
+                'email': verification_user.email,
+                'phone': verification_user.phone,
+                'registration_completed': verification_user.registration_completed,
+                'created_at': verification_user.created_at.isoformat() if verification_user.created_at else None,
+                'verification_success': True
             }
+            
+            logger.info(f"✅ Пользователь ПОЛНОСТЬЮ сохранен: {result}")
+            return result
             
         except Exception as e:
             db.rollback()
-            logger.error(f"Ошибка сохранения пользователя {telegram_id}: {e}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА сохранения пользователя {telegram_id}: {e}")
+            logger.error(f"Входящие данные: name='{name}', email='{email}', phone='{phone}'")
             raise e
         finally:
             db.close()
+            logger.info(f"=== ЗАВЕРШЕНИЕ СОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
     
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _save)
@@ -487,11 +520,14 @@ async def save_survey_data(telegram_id: int, state_data: Dict[str, Any]):
 
 
 async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
-    """Улучшенное сохранение результатов тестов с заполнением всех колонок и интерпретацией"""
+    """УЛУЧШЕННОЕ сохранение результатов тестов с детальной диагностикой"""
     def _save():
         db = get_db_sync()
         try:
             current_time = datetime.now()
+            
+            logger.info(f"=== НАЧАЛО СОХРАНЕНИЯ ТЕСТОВ ДЛЯ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
+            logger.info(f"Входящие данные тестов: {test_data}")
             
             # Обновляем пользователя
             user = db.query(User).filter(User.telegram_id == telegram_id).first()
@@ -499,6 +535,10 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                 user.last_activity = current_time
                 user.tests_completed = True
                 user.updated_at = current_time
+                logger.info(f"Пользователь найден и обновлен: {user.telegram_id}")
+            else:
+                logger.error(f"ОШИБКА: Пользователь {telegram_id} не найден в базе данных!")
+                raise Exception(f"Пользователь {telegram_id} не найден")
             
             # Получаем данные опроса для расчета общего риска
             survey = db.query(Survey).filter(Survey.telegram_id == telegram_id).first()
@@ -511,13 +551,14 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                     'health_rating': survey.health_rating,
                     'cv_risk': survey.cv_risk
                 }
+                logger.info(f"Данные опроса найдены для расчета риска: {survey_data}")
+            else:
+                logger.warning(f"Данные опроса не найдены для пользователя {telegram_id}")
             
             # Импортируем функции интерпретации с обработкой ошибок
             try:
-                from surveys import (
-                    calculate_hads_scores, get_risk_category, 
-                    calculate_overall_cardiovascular_risk
-                )
+                from surveys import get_risk_category, calculate_overall_cardiovascular_risk
+                logger.info("Функции интерпретации импортированы успешно")
             except ImportError as e:
                 logger.error(f"Ошибка импорта функций из surveys: {e}")
                 # Используем простые fallback функции
@@ -531,6 +572,9 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                         'factors_count': 0
                     }
             
+            # Подготавливаем данные для валидации
+            logger.info("Начинаю валидацию данных тестов...")
+            
             # Рассчитываем HADS scores если есть данные
             hads_anxiety_score = test_data.get('hads_anxiety_score')
             hads_depression_score = test_data.get('hads_depression_score')
@@ -538,12 +582,16 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             
             if hads_anxiety_score is not None and hads_depression_score is not None:
                 hads_total_score = hads_anxiety_score + hads_depression_score
+                logger.info(f"HADS баллы рассчитаны: тревога={hads_anxiety_score}, депрессия={hads_depression_score}, общий={hads_total_score}")
+            else:
+                logger.warning(f"HADS данные неполные: тревога={hads_anxiety_score}, депрессия={hads_depression_score}")
             
             # Рассчитываем общий сердечно-сосудистый риск
             user_data = {'name': user.name if user else None}
             
             try:
                 risk_assessment = calculate_overall_cardiovascular_risk(user_data, survey_data, test_data)
+                logger.info(f"Оценка риска рассчитана: {risk_assessment}")
             except Exception as e:
                 logger.error(f"Ошибка расчета риска для {telegram_id}: {e}")
                 risk_assessment = {
@@ -555,10 +603,13 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             # Удаляем старые результаты если есть
             old_results = db.query(TestResult).filter(TestResult.telegram_id == telegram_id).first()
             if old_results:
+                logger.info(f"Найдены старые результаты тестов для {telegram_id}, удаляю...")
                 db.delete(old_results)
                 db.flush()
             
-            # Создаем новые результаты с заполнением ВСЕХ колонок
+            # Создаем новые результаты с заполнением ВСЕХ колонок и детальной проверкой
+            logger.info("Создаю новую запись TestResult...")
+            
             test_result = TestResult(
                 telegram_id=telegram_id,
                 
@@ -605,6 +656,22 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                 completed_at=current_time
             )
             
+            # ДЕТАЛЬНАЯ ПРОВЕРКА СОЗДАННОЙ ЗАПИСИ
+            logger.info("=== ПРОВЕРКА СОЗДАННОЙ ЗАПИСИ TestResult ===")
+            logger.info(f"telegram_id: {test_result.telegram_id}")
+            logger.info(f"hads_anxiety_score: {test_result.hads_anxiety_score}")
+            logger.info(f"hads_depression_score: {test_result.hads_depression_score}")
+            logger.info(f"burns_score: {test_result.burns_score}")
+            logger.info(f"isi_score: {test_result.isi_score}")
+            logger.info(f"stop_bang_score: {test_result.stop_bang_score}")
+            logger.info(f"ess_score: {test_result.ess_score}")
+            logger.info(f"fagerstrom_score: {test_result.fagerstrom_score}")
+            logger.info(f"fagerstrom_skipped: {test_result.fagerstrom_skipped}")
+            logger.info(f"audit_score: {test_result.audit_score}")
+            logger.info(f"audit_skipped: {test_result.audit_skipped}")
+            logger.info(f"overall_cv_risk_level: {test_result.overall_cv_risk_level}")
+            
+            # Добавляем в сессию
             db.add(test_result)
             
             # Логируем завершение тестов с подробной информацией
@@ -639,10 +706,25 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
             )
             db.add(log_entry)
             
-            # Коммитим изменения
+            # КРИТИЧЕСКИ ВАЖНО: Коммитим изменения
+            logger.info("Выполняю commit транзакции...")
             db.commit()
+            logger.info("✅ COMMIT УСПЕШНО ВЫПОЛНЕН!")
             
-            logger.info(f"Результаты тестов успешно сохранены для пользователя {telegram_id}")
+            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: читаем данные из базы
+            logger.info("=== ПРОВЕРКА СОХРАНЕНИЯ В БАЗЕ ===")
+            verification_query = db.query(TestResult).filter(TestResult.telegram_id == telegram_id).first()
+            if verification_query:
+                logger.info(f"✅ ПОДТВЕРЖДЕНИЕ: Данные найдены в базе для пользователя {telegram_id}")
+                logger.info(f"ID записи: {verification_query.id}")
+                logger.info(f"Уровень риска: {verification_query.overall_cv_risk_level}")
+                logger.info(f"HADS тревога: {verification_query.hads_anxiety_score}")
+                logger.info(f"HADS депрессия: {verification_query.hads_depression_score}")
+            else:
+                logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Данные НЕ НАЙДЕНЫ в базе после commit!")
+                raise Exception("Данные не сохранились в базе данных")
+            
+            logger.info(f"✅ Результаты тестов ПОЛНОСТЬЮ сохранены для пользователя {telegram_id}")
             
             # Возвращаем результаты тестов
             return {
@@ -661,15 +743,19 @@ async def save_test_results(telegram_id: int, test_data: Dict[str, Any]):
                     'ess': test_result.ess_score,
                     'fagerstrom': test_result.fagerstrom_score,
                     'audit': test_result.audit_score
-                }
+                },
+                'verification_success': True
             }
             
         except Exception as e:
             db.rollback()
-            logger.error(f"Ошибка сохранения тестов {telegram_id}: {e}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА сохранения тестов {telegram_id}: {e}")
+            logger.error(f"Входящие данные: {test_data}")
+            logger.error(f"Состояние транзакции на момент ошибки: rollback выполнен")
             raise e
         finally:
             db.close()
+            logger.info(f"=== ЗАВЕРШЕНИЕ СОХРАНЕНИЯ ТЕСТОВ ДЛЯ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
     
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _save)

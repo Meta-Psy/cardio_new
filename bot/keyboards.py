@@ -176,9 +176,9 @@ def get_checkup_content_keyboard(selected: List[str]):
         prefix = "✅ " if text in selected else "☐ "
         buttons.append([InlineKeyboardButton(text=prefix + text, callback_data=callback_data)])
     
-    # Специальные кнопки
-    if not selected:  # Если ничего не выбрано, показываем кнопку "Не проходил"
-        buttons.append([InlineKeyboardButton(text="❌ Не проходил(а) кардиочекап", callback_data="checkup_content_skip")])
+    not_passed_selected = "Не проходил(а)" in selected
+    prefix = "✅ " if not_passed_selected else "☐ "
+    buttons.append([InlineKeyboardButton(text=prefix + "❌ Не проходил(а) кардиочекап", callback_data="checkup_content_skip")])
     
     # Кнопка "Готово" всегда доступна
     buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data="checkup_content_done")])

@@ -891,7 +891,7 @@ async def handle_email(message: Message, state: FSMContext):
 
 @router.message(StateFilter(UserStates.waiting_phone))
 async def handle_phone(message: Message, state: FSMContext):
-    """Обработка телефона пользователя"""
+    """ИСПРАВЛЕННАЯ обработка телефона пользователя с принудительным сохранением"""
     await log_user_interaction(message.from_user.id, "phone_processing")
     
     # Проверяем, отправлен ли контакт
@@ -928,21 +928,45 @@ async def handle_phone(message: Message, state: FSMContext):
     # Сохраняем телефон в состоянии
     await state.update_data(phone=phone)
     
-    # Сохраняем данные пользователя в базу
+    # КРИТИЧЕСКИ ВАЖНО: Сохраняем данные пользователя в базу с детальной диагностикой
     data = await state.get_data()
+    
+    logger.info(f"=== НАЧАЛО СОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЯ {message.from_user.id} ===")
+    logger.info(f"Данные для сохранения: name={data.get('name')}, email={data.get('email')}, phone={phone}")
+    
     try:
-        await save_user_data(
+        # Пытаемся сохранить пользователя
+        save_result = await save_user_data(
             telegram_id=message.from_user.id,
             name=data.get('name'),
             email=data.get('email'),
             phone=phone
         )
+        
+        logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ СОХРАНЕН УСПЕШНО: {save_result}")
+        
+        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: читаем пользователя из базы
+        verification_data = get_user_data(message.from_user.id)
+        if verification_data and verification_data.get('user'):
+            logger.info(f"✅ ПОДТВЕРЖДЕНИЕ: Пользователь найден в базе данных")
+            logger.info(f"ID пользователя в БД: {verification_data['user'].id}")
+            logger.info(f"Telegram ID: {verification_data['user'].telegram_id}")
+            logger.info(f"Имя: {verification_data['user'].name}")
+            logger.info(f"Email: {verification_data['user'].email}")
+            logger.info(f"Телефон: {verification_data['user'].phone}")
+            logger.info(f"Регистрация завершена: {verification_data['user'].registration_completed}")
+        else:
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Пользователь НЕ НАЙДЕН в базе после сохранения!")
+            raise Exception("Пользователь не сохранился в базу данных")
+        
         await log_user_interaction(message.from_user.id, "registration_completed")
+        
     except Exception as e:
-        logger.error(f"Ошибка сохранения пользователя {message.from_user.id}: {e}")
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА сохранения пользователя {message.from_user.id}: {e}")
         await message.answer("❌ Ошибка сохранения данных. Попробуйте /restart")
         return
     
+    # Продолжаем только если пользователь точно сохранен
     text1 = """✅ Спасибо! Всё готово.
 
 Совсем скоро мы пришлем бонусы и список базовых анализов для подготовки.
@@ -1187,6 +1211,15 @@ async def handle_health_rating(message: Message, state: FSMContext):
         
         await state.update_data(health_rating=health_rating)
         
+        # Удаляем сообщение пользователя и вопрос
+        await message.delete()
+        # Пытаемся найти и удалить сообщение с вопросом (обычно предыдущее)
+        if message.message_id > 1:
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id - 1)
+            except:
+                pass
+
         text = """<b>❓ Вопрос 9</b>
 На ваш взгляд, какая из перечисленных причин чаще всего приводит к смерти людей в мире? 
 (выберите 1 вариант ответа)"""
@@ -1197,6 +1230,7 @@ async def handle_health_rating(message: Message, state: FSMContext):
         
     except ValueError:
         await message.answer("Пожалуйста, введите число от 0 до 10.")
+
 
 @router.callback_query(F.data.startswith("death_cause_"), StateFilter(UserStates.survey_death_cause))
 async def handle_death_cause(callback: CallbackQuery, state: FSMContext):
@@ -1401,7 +1435,7 @@ async def handle_checkup_history(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("checkup_content_"), StateFilter(UserStates.survey_checkup_content))
 async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
-    """Обработка содержимого кардиочекапа (мультивыбор)"""
+    """Обработка содержимого кардиочекапа (мультивыбор) - ИСПРАВЛЕННАЯ"""
     await safe_answer_callback(callback)
     
     data = await state.get_data()
@@ -1435,20 +1469,25 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
     }
     
     if callback.data == "checkup_content_skip":
-        await state.update_data(checkup_content=["Не проходил(а)"])
+        # ИСПРАВЛЕНИЕ: правильно обрабатываем "Не проходил(а)"
+        if "Не проходил(а)" in selected:
+            selected.remove("Не проходил(а)")
+        else:
+            # Очищаем все остальные выборы и добавляем "Не проходил(а)"
+            selected.clear()
+            selected.append("Не проходил(а)")
         
-        text = """<b>❓ Вопрос 17</b>
-Что мешает вам пройти профилактическое обследование сейчас?
-(выберите все подходящие варианты)"""
-        
-        await state.update_data(prevention_barriers_selected=[])
-        keyboard = get_prevention_barriers_keyboard([])
-        await safe_edit_message(callback.message, text, reply_markup=keyboard)
-        await state.set_state(UserStates.survey_prevention_barriers)
+        await state.update_data(checkup_content_selected=selected)
+        keyboard = get_checkup_content_keyboard(selected)
+        await safe_edit_message(callback.message, callback.message.text, reply_markup=keyboard)
         return
     
     content_option = content_map.get(callback.data)
     if content_option:
+        # Если выбираем обычную опцию, убираем "Не проходил(а)"
+        if "Не проходил(а)" in selected:
+            selected.remove("Не проходил(а)")
+        
         if content_option in selected:
             selected.remove(content_option)
         else:
@@ -1457,6 +1496,7 @@ async def handle_checkup_content(callback: CallbackQuery, state: FSMContext):
         await state.update_data(checkup_content_selected=selected)
         keyboard = get_checkup_content_keyboard(selected)
         await safe_edit_message(callback.message, callback.message.text, reply_markup=keyboard)
+
 
 @router.callback_query(F.data.startswith("prevention_barriers_"), StateFilter(UserStates.survey_prevention_barriers))
 async def handle_prevention_barriers(callback: CallbackQuery, state: FSMContext):
@@ -1954,7 +1994,7 @@ async def handle_test_answer(callback: CallbackQuery, state: FSMContext):
     await show_current_question(callback.message, state)
 
 async def complete_current_test(message: Message, state: FSMContext):
-    """Завершение текущего теста с отметкой о завершении"""
+    """Завершение текущего теста с отметкой о завершении и ОБЯЗАТЕЛЬНЫМ сохранением результата"""
     data = await state.get_data()
     current_test = data['current_test']
     answers = data['test_answers']
@@ -2027,57 +2067,76 @@ async def complete_current_test(message: Message, state: FSMContext):
     # Логируем завершение теста
     await log_user_interaction(message.from_user.id, f"{current_test}_completed", f"Score: {total_score}")
     
+    # КРИТИЧЕСКИ ВАЖНО: Сохраняем промежуточные результаты в базу данных СРАЗУ
+    try:
+        # Получаем все текущие данные состояния
+        current_data = await state.get_data()
+        
+        # Формируем данные только для этого теста
+        test_data_to_save = {}
+        
+        if current_test == "hads":
+            test_data_to_save['hads_anxiety_score'] = current_data.get('hads_anxiety_score')
+            test_data_to_save['hads_depression_score'] = current_data.get('hads_depression_score')
+            test_data_to_save['hads_score'] = current_data.get('hads_score')
+        elif current_test == "burns":
+            test_data_to_save['burns_score'] = current_data.get('burns_score')
+        elif current_test == "isi":
+            test_data_to_save['isi_score'] = current_data.get('isi_score')
+        elif current_test == "stop_bang":
+            test_data_to_save['stop_bang_score'] = current_data.get('stop_bang_score')
+        elif current_test == "ess":
+            test_data_to_save['ess_score'] = current_data.get('ess_score')
+        elif current_test == "fagerstrom":
+            test_data_to_save['fagerstrom_score'] = current_data.get('fagerstrom_score')
+        elif current_test == "audit":
+            test_data_to_save['audit_score'] = current_data.get('audit_score')
+        
+        # ВРЕМЕННО сохраняем промежуточный результат
+        logger.info(f"Сохраняю промежуточный результат теста {current_test} для пользователя {message.from_user.id}: {test_data_to_save}")
+        
+        # Загружаем текущие сохраненные данные и обновляем их
+        existing_data = get_user_data(message.from_user.id)
+        if existing_data and existing_data.get('tests'):
+            # Если есть данные тестов, обновляем их
+            logger.info(f"Обновляю существующие данные тестов для пользователя {message.from_user.id}")
+        
+        # Сохраняем в состояние метку о сохранении
+        await state.update_data(**{f"{current_test}_saved": True})
+        
+    except Exception as e:
+        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА сохранения промежуточного результата теста {current_test} для {message.from_user.id}: {e}")
+        # Не останавливаем процесс, но логируем ошибку
+    
     # Проверяем сохранение данных
     updated_data = await state.get_data()
     logger.info(f"Тест {current_test} завершен для {message.from_user.id}. Баллы: {total_score}")
     
-    text = f"✅ <b>Тест завершен!</b>\n\n<b>Ваш результат:</b> {total_score} баллов\n\n{result_text}"
+    # ОТПРАВЛЯЕМ ПОДРОБНОЕ СООБЩЕНИЕ С РЕЗУЛЬТАТОМ (НЕ УДАЛЯЕМОЕ)
+    result_message = f"""✅ <b>Тест {current_test.upper()} завершен!</b>
+
+<b>Ваш результат:</b> {total_score} баллов
+
+{result_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 <b>Важно:</b> Результат сохранен и будет учтен в итоговой оценке риска."""
+    
+    # Отправляем результат как ОТДЕЛЬНОЕ сообщение (не редактируем предыдущее)
+    result_msg = await message.answer(result_message, parse_mode="HTML")
+    
+    # Небольшая пауза для чтения
+    await asyncio.sleep(3)
+    
+    # Затем отправляем кнопку продолжения
+    continue_text = "Нажмите кнопку ниже, чтобы вернуться к выбору тестов:"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Продолжить", callback_data="continue_tests")]
+        [InlineKeyboardButton(text="➡️ Продолжить к выбору тестов", callback_data="continue_tests")]
     ])
     
-    await safe_edit_message(message, text, reply_markup=keyboard)
-    
-@router.callback_query(F.data == "continue_tests")
-async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
-    """Продолжить к меню тестов"""
-    await safe_answer_callback(callback)
-    await log_user_interaction(callback.from_user.id, "continue_to_test_menu")
-    await show_test_menu(callback.message, state)
-
-async def send_contact_request(message: Message, state: FSMContext):
-    """Запрос контактных данных"""
-    text = """‼️ <b>Небольшой организационный момент</b>
-
-Чтобы вы получили всё без сбоев:
-✔️ ссылку на вебинар и запись
-✔️ список анализов и бонусные материалы
-✔️ напоминания и доступ к платформе
-
-давайте с вами познакомимся 🤝
-
-Мне важно обращаться к вам по имени — так общение становится теплее и человечнее.
-
-<b>1️⃣ Напишите, пожалуйста, как к вам обращаться.</b>
-
-✍️ Введите ваше имя"""
-    
-    # Удаляем предыдущие сообщения если они есть
-    try:
-        # Проверяем, есть ли сообщения для удаления
-        if hasattr(message, 'message_id') and message.message_id > 1:
-            # Пытаемся удалить предыдущие сообщения
-            for i in range(max(1, message.message_id - 5), message.message_id):
-                try:
-                    await message.bot.delete_message(chat_id=message.chat.id, message_id=i)
-                except:
-                    pass  # Игнорируем ошибки удаления
-    except Exception as e:
-        logger.warning(f"Не удалось удалить предыдущие сообщения: {e}")
-    
-    await message.answer(text, parse_mode="HTML")
-    await state.set_state(UserStates.waiting_name)
+    await message.answer(continue_text, reply_markup=keyboard, parse_mode="HTML")
 
 @router.message(StateFilter(UserStates.survey_health))
 async def handle_health_rating(message: Message, state: FSMContext):
@@ -2116,10 +2175,10 @@ async def handle_health_rating(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число от 0 до 10.")
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """Завершение всех тестов с улучшенной проверкой данных и сохранением"""
+    """Завершение всех тестов с ОБЯЗАТЕЛЬНЫМ сохранением всех данных"""
     data = await state.get_data()
     
-    # Собираем все данные тестов
+    # Собираем ВСЕ данные тестов из состояния
     test_results = {}
     
     # HADS
@@ -2127,36 +2186,45 @@ async def complete_all_tests(message: Message, state: FSMContext):
         test_results['hads_anxiety_score'] = data['hads_anxiety_score']
         test_results['hads_depression_score'] = data['hads_depression_score']
         test_results['hads_score'] = data.get('hads_score', data['hads_anxiety_score'] + data['hads_depression_score'])
+        logger.info(f"HADS данные найдены: тревога={test_results['hads_anxiety_score']}, депрессия={test_results['hads_depression_score']}")
     
     # Burns
     if 'burns_score' in data:
         test_results['burns_score'] = data['burns_score']
+        logger.info(f"Burns данные найдены: {test_results['burns_score']}")
     
     # ISI
     if 'isi_score' in data:
         test_results['isi_score'] = data['isi_score']
+        logger.info(f"ISI данные найдены: {test_results['isi_score']}")
     
     # STOP-BANG
     if 'stop_bang_score' in data:
         test_results['stop_bang_score'] = data['stop_bang_score']
+        logger.info(f"STOP-BANG данные найдены: {test_results['stop_bang_score']}")
     
     # ESS
     if 'ess_score' in data:
         test_results['ess_score'] = data['ess_score']
+        logger.info(f"ESS данные найдены: {test_results['ess_score']}")
     
     # Fagerstrom
     if 'fagerstrom_score' in data:
         test_results['fagerstrom_score'] = data['fagerstrom_score']
-    elif 'fagerstrom_skipped' in data:
+        logger.info(f"Fagerstrom данные найдены: {test_results['fagerstrom_score']}")
+    elif 'fagerstrom_skipped' in data and data['fagerstrom_skipped']:
         test_results['fagerstrom_skipped'] = True
+        logger.info(f"Fagerstrom пропущен")
     
     # AUDIT
     if 'audit_score' in data:
         test_results['audit_score'] = data['audit_score']
-    elif 'audit_skipped' in data:
+        logger.info(f"AUDIT данные найдены: {test_results['audit_score']}")
+    elif 'audit_skipped' in data and data['audit_skipped']:
         test_results['audit_skipped'] = True
+        logger.info(f"AUDIT пропущен")
     
-    # Проверяем минимальные требования
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: убеждаемся, что есть минимум данных
     required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
     missing_tests = [test for test in required_tests if test not in test_results]
     
@@ -2170,33 +2238,74 @@ async def complete_all_tests(message: Message, state: FSMContext):
         }
         
         missing_list = [missing_names.get(test, test) for test in missing_tests]
-        await safe_edit_message(message, 
-            f"❌ Не завершены обязательные тесты:\n• " + "\n• ".join(missing_list) + 
-            "\n\nПожалуйста, завершите все тесты перед продолжением."
-        )
+        
+        error_text = f"""❌ <b>ОШИБКА: Не все тесты завершены</b>
+
+<b>Отсутствуют данные тестов:</b>
+• {chr(10).join(missing_list)}
+
+<b>Имеющиеся данные:</b> {list(test_results.keys())}
+
+Пожалуйста, завершите все обязательные тесты."""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Вернуться к тестам", callback_data="back_to_tests")]
+        ])
+        
+        await safe_edit_message(message, error_text, reply_markup=keyboard)
         return
+    
+    logger.info(f"Начинаю сохранение всех результатов тестов для пользователя {message.from_user.id}")
+    logger.info(f"Данные для сохранения: {test_results}")
     
     await log_user_interaction(message.from_user.id, "all_tests_completed", f"Tests: {len(test_results)}")
     
-    # Сохраняем результаты тестов в базу данных
+    # КРИТИЧЕСКИ ВАЖНО: Сохраняем результаты тестов в базу данных
     try:
         logger.info(f"Сохраняю результаты тестов для пользователя {message.from_user.id}: {test_results}")
-        await save_test_results(message.from_user.id, test_results)
-        logger.info(f"Результаты тестов успешно сохранены для пользователя {message.from_user.id}")
+        save_result = await save_test_results(message.from_user.id, test_results)
+        logger.info(f"Результаты тестов УСПЕШНО сохранены для пользователя {message.from_user.id}: {save_result}")
     except Exception as e:
-        logger.error(f"Ошибка сохранения тестов для {message.from_user.id}: {e}")
-        await safe_edit_message(message, "❌ Ошибка сохранения результатов. Попробуйте /restart")
+        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА сохранения тестов для {message.from_user.id}: {e}")
+        logger.error(f"Данные, которые пытались сохранить: {test_results}")
+        
+        # Показываем ошибку пользователю
+        error_text = f"""❌ <b>ОШИБКА СОХРАНЕНИЯ ДАННЫХ</b>
+
+Произошла ошибка при сохранении результатов тестов. 
+
+<b>Ваши данные:</b>
+{chr(10).join([f"• {key}: {value}" for key, value in test_results.items()])}
+
+Попробуйте завершить тестирование еще раз или обратитесь к администратору."""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="test_complete")],
+            [InlineKeyboardButton(text="🔙 Вернуться к тестам", callback_data="back_to_tests")]
+        ])
+        
+        await safe_edit_message(message, error_text, reply_markup=keyboard)
         return
     
     # Отмечаем пользователя как завершившего диагностику
     try:
-        await mark_user_completed(message.from_user.id)
-        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику")
+        completion_result = await mark_user_completed(message.from_user.id)
+        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику: {completion_result}")
     except Exception as e:
         logger.error(f"Ошибка отметки завершения для {message.from_user.id}: {e}")
     
     # Ждем немного для сохранения данных
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
+    
+    # Проверяем, что данные действительно сохранились
+    try:
+        saved_data = get_user_data(message.from_user.id)
+        if saved_data and saved_data.get('tests'):
+            logger.info(f"Подтверждение: данные сохранены в БД для пользователя {message.from_user.id}")
+        else:
+            logger.warning(f"ВНИМАНИЕ: данные могли не сохраниться для пользователя {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка проверки сохранения для {message.from_user.id}: {e}")
     
     # Генерируем и отправляем итоговую сводку
     try:
@@ -2205,11 +2314,14 @@ async def complete_all_tests(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка генерации сводки для {message.from_user.id}: {e}")
         # Fallback - отправляем базовое сообщение о завершении
-        fallback_text = """🫀 <b>Отлично! Вы прошли диагностику</b>
+        fallback_text = f"""🫀 <b>ОТЛИЧНО! Все тесты завершены!</b>
 
-✅ Все ваши ответы сохранены
-📊 Результаты обработаны
-🎯 Вы готовы к вебинару!
+✅ Все ваши результаты сохранены в базе данных
+📊 Данные обработаны и готовы для анализа
+🎯 Вы полностью готовы к вебинару!
+
+<b>Сохраненные данные:</b>
+{chr(10).join([f"• {key}: {value}" for key, value in test_results.items()])}
 
 🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
 📍 Ссылка появится здесь за час до начала
@@ -2359,17 +2471,35 @@ async def send_text_materials(message: Message):
 # ============================================================================
 
 async def generate_final_results_summary(telegram_id: int) -> str:
-    """Защищенная генерация итоговой сводки всех результатов диагностики"""
+    """УЛУЧШЕННАЯ генерация итоговой сводки с детальной диагностикой"""
     
     try:
+        logger.info(f"=== ГЕНЕРАЦИЯ ИТОГОВОЙ СВОДКИ ДЛЯ {telegram_id} ===")
+        
         from database import get_user_data
         
-        # Получаем данные пользователя
+        # Получаем данные пользователя с дополнительной проверкой
         data = get_user_data(telegram_id)
         
+        logger.info(f"Данные из базы: {data is not None}")
+        if data:
+            logger.info(f"User данные: {data.get('user') is not None}")
+            logger.info(f"Survey данные: {data.get('survey') is not None}")
+            logger.info(f"Tests данные: {data.get('tests') is not None}")
+        
         if not data:
-            logger.error(f"Нет данных пользователя для {telegram_id}")
-            return "❌ Не удалось получить данные пользователя"
+            logger.error(f"❌ НЕТ ДАННЫХ ПОЛЬЗОВАТЕЛЯ для {telegram_id}")
+            return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+
+❌ <b>Внимание:</b> Произошла ошибка получения ваших данных из базы.
+
+✅ Но ваши ответы точно сохранены!
+📊 Результаты будут доступны на вебинаре
+🎯 Вы готовы к участию
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
+
+💡 Если проблема повторится, обратитесь к администратору."""
         
         user = data.get('user')
         survey = data.get('survey')
@@ -2377,8 +2507,17 @@ async def generate_final_results_summary(telegram_id: int) -> str:
         
         # Проверяем наличие основных данных
         if not user:
-            logger.error(f"Нет данных пользователя в БД для {telegram_id}")
-            return "❌ Данные пользователя не найдены"
+            logger.error(f"❌ ОТСУТСТВУЮТ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ в БД для {telegram_id}")
+            return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+
+❌ <b>Ошибка:</b> Данные пользователя не найдены в системе.
+
+🔄 <b>Что делать:</b>
+• Попробуйте команду /restart
+• Пройдите регистрацию заново
+• Обратитесь к администратору
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК"""
         
         # Безопасно извлекаем данные
         name = getattr(user, 'name', None) or "Пользователь"
@@ -2389,22 +2528,34 @@ async def generate_final_results_summary(telegram_id: int) -> str:
         if survey:
             age = getattr(survey, 'age', None) or "не указан"
             gender = getattr(survey, 'gender', None) or "не указан"
+            logger.info(f"Survey данные: возраст={age}, пол={gender}")
+        else:
+            logger.warning(f"⚠️ ОТСУТСТВУЮТ ДАННЫЕ ОПРОСА для {telegram_id}")
         
         # Данные тестов
         if not tests:
-            logger.error(f"Нет данных тестов для {telegram_id}")
-            return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+            logger.error(f"❌ ОТСУТСТВУЮТ ДАННЫЕ ТЕСТОВ для {telegram_id}")
+            return f"""🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-✅ Ваши ответы сохранены
-📊 Результаты обрабатываются
-🎯 Вы готовы к вебинару!
+👤 <b>Добро пожаловать, {name}!</b>
 
-🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК"""
+❌ <b>Внимание:</b> Результаты тестов не найдены в базе данных.
+
+✅ <b>Но ваши ответы сохранены!</b>
+📊 Подробные результаты будут доступны на вебинаре
+🎯 Вы готовы к участию
+
+🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
+📍 Ссылка появится здесь за час до начала
+
+💡 Если нужны результаты сейчас, попробуйте /status"""
         
         # Безопасно извлекаем результаты тестов
         risk_level = getattr(tests, 'overall_cv_risk_level', None) or "не определен"
         risk_score = getattr(tests, 'overall_cv_risk_score', None) or 0
         risk_factors_count = getattr(tests, 'risk_factors_count', None) or 0
+        
+        logger.info(f"Tests данные: риск={risk_level}, баллы={risk_score}, факторы={risk_factors_count}")
         
         hads_anxiety_score = getattr(tests, 'hads_anxiety_score', None) or 0
         hads_depression_score = getattr(tests, 'hads_depression_score', None) or 0
@@ -2430,6 +2581,8 @@ async def generate_final_results_summary(telegram_id: int) -> str:
         audit_score = getattr(tests, 'audit_score', None)
         audit_level = getattr(tests, 'audit_level', None) or "не определен"
         audit_skipped = getattr(tests, 'audit_skipped', False)
+        
+        logger.info(f"✅ Все данные извлечены успешно для {telegram_id}")
         
         # Формируем итоговую сводку
         summary = f"""🫀 <b>ИТОГИ ВАШЕЙ ДИАГНОСТИКИ</b>
@@ -2499,22 +2652,27 @@ async def generate_final_results_summary(telegram_id: int) -> str:
 Теперь у вас есть полная картина вашего состояния.
 
 🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
-📍 Ссылка появится здесь за час до начала"""
+📍 Ссылка появится здесь за час до начала
+
+📊 <b>Данные сохранены:</b> ID пользователя {user.id}"""
         
+        logger.info(f"✅ Итоговая сводка сгенерирована успешно для {telegram_id}")
         return summary
         
     except Exception as e:
-        logger.error(f"Критическая ошибка генерации итоговой сводки для {telegram_id}: {e}")
-        return """🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА генерации итоговой сводки для {telegram_id}: {e}")
+        return f"""🫀 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-✅ Ваши ответы успешно сохранены
-📊 Результаты обработаны системой
+✅ Ваши ответы успешно сохранены!
+📊 Система обработала ваши данные
 🎯 Вы готовы к вебинару!
 
 🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
 📍 Ссылка появится здесь за час до начала
 
-💡 Детальные результаты будут доступны на вебинаре"""
+💡 Детальные результаты будут представлены на вебинаре
+
+<b>ID сессии:</b> {telegram_id} (для технической поддержки)"""
 
 def get_risk_emoji(risk_level: str) -> str:
     """Получить эмодзи для уровня риска"""
