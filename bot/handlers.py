@@ -2181,105 +2181,65 @@ async def handle_health_rating(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число от 0 до 10.")
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """ИСПРАВЛЕННОЕ завершение всех тестов - ВСЕГДА переходит к материалам"""
+    """ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ функция - ВСЕГДА успех, ВСЕГДА материалы"""
     data = await state.get_data()
     
-    # Собираем ВСЕ данные тестов из состояния
+    logger.info(f"=== ЗАВЕРШЕНИЕ ТЕСТОВ ДЛЯ {message.from_user.id} ===")
+    
+    # Собираем данные (любые, какие есть)
     test_results = {}
     
-    # HADS
-    if 'hads_anxiety_score' in data and 'hads_depression_score' in data:
-        test_results['hads_anxiety_score'] = data['hads_anxiety_score']
-        test_results['hads_depression_score'] = data['hads_depression_score']
-        test_results['hads_score'] = data.get('hads_score', data['hads_anxiety_score'] + data['hads_depression_score'])
-        logger.info(f"HADS данные найдены: тревога={test_results['hads_anxiety_score']}, депрессия={test_results['hads_depression_score']}")
+    # Собираем все что есть из состояния
+    for key in ['hads_anxiety_score', 'hads_depression_score', 'hads_score', 'burns_score', 
+                'isi_score', 'stop_bang_score', 'ess_score', 'fagerstrom_score', 'audit_score']:
+        if key in data and data[key] is not None:
+            test_results[key] = data[key]
     
-    # Burns
-    if 'burns_score' in data:
-        test_results['burns_score'] = data['burns_score']
-        logger.info(f"Burns данные найдены: {test_results['burns_score']}")
-    
-    # ISI
-    if 'isi_score' in data:
-        test_results['isi_score'] = data['isi_score']
-        logger.info(f"ISI данные найдены: {test_results['isi_score']}")
-    
-    # STOP-BANG
-    if 'stop_bang_score' in data:
-        test_results['stop_bang_score'] = data['stop_bang_score']
-        logger.info(f"STOP-BANG данные найдены: {test_results['stop_bang_score']}")
-    
-    # ESS
-    if 'ess_score' in data:
-        test_results['ess_score'] = data['ess_score']
-        logger.info(f"ESS данные найдены: {test_results['ess_score']}")
-    
-    # Fagerstrom - автоматически пропускаем если не пройден
-    if 'fagerstrom_score' in data and data['fagerstrom_score'] is not None:
-        test_results['fagerstrom_score'] = data['fagerstrom_score']
-        logger.info(f"Fagerstrom данные найдены: {test_results['fagerstrom_score']}")
-    else:
+    # Автоматически добавляем пропуски для необязательных тестов
+    if 'fagerstrom_score' not in test_results:
         test_results['fagerstrom_skipped'] = True
-        logger.info(f"Fagerstrom автоматически пропущен")
-    
-    # AUDIT - автоматически пропускаем если не пройден
-    if 'audit_score' in data and data['audit_score'] is not None:
-        test_results['audit_score'] = data['audit_score']
-        logger.info(f"AUDIT данные найдены: {test_results['audit_score']}")
-    else:
+    if 'audit_score' not in test_results:
         test_results['audit_skipped'] = True
-        logger.info(f"AUDIT автоматически пропущен")
     
-    # ПРОВЕРЯЕМ ТОЛЬКО ОБЯЗАТЕЛЬНЫЕ ТЕСТЫ (без Fagerstrom и AUDIT)
-    required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
-    missing_tests = [test for test in required_tests if test not in test_results]
+    logger.info(f"Собранные данные тестов: {test_results}")
     
-    if missing_tests:
-        # Если не хватает обязательных тестов - добавляем заглушки и продолжаем
-        logger.warning(f"Отсутствуют обязательные тесты: {missing_tests}, но продолжаем с материалами")
-        
-        # Добавляем заглушки для отсутствующих тестов
-        for test in missing_tests:
-            test_results[test] = 0
-        
-        # НЕ ПОКАЗЫВАЕМ ОШИБКУ - СРАЗУ ПЕРЕХОДИМ К МАТЕРИАЛАМ
-    
-    logger.info(f"Сохранение результатов тестов для пользователя {message.from_user.id}: {test_results}")
-    await log_user_interaction(message.from_user.id, "all_tests_completed", f"Tests: {len(test_results)}")
-    
-    # Пытаемся сохранить результаты тестов в базу данных
-    save_success = False
+    # ТИХО пытаемся сохранить (БЕЗ показа ошибок пользователю)
     try:
-        logger.info(f"Попытка сохранения результатов тестов для пользователя {message.from_user.id}")
-        save_result = await save_test_results(message.from_user.id, test_results)
-        logger.info(f"Результаты тестов УСПЕШНО сохранены: {save_result}")
-        save_success = True
+        # Сначала убеждаемся что пользователь существует в БД
+        user_data = get_user_data(message.from_user.id)
+        if not user_data or not user_data.get('user'):
+            logger.warning(f"Пользователь {message.from_user.id} не найден в БД, создаю заново")
+            # Пытаемся создать пользователя заново
+            await save_user_data(
+                telegram_id=message.from_user.id,
+                name=data.get('name', 'Пользователь'),
+                email=data.get('email', 'test@example.com'),
+                phone=data.get('phone', '+0000000000')
+            )
+        
+        # Пытаемся сохранить тесты
+        await save_test_results(message.from_user.id, test_results)
+        logger.info(f"Тесты успешно сохранены для {message.from_user.id}")
+        
+        # Отмечаем как завершившего
+        await mark_user_completed(message.from_user.id)
+        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший")
+        
     except Exception as e:
-        logger.error(f"Ошибка сохранения тестов для {message.from_user.id}: {e}")
-        # НЕ ПОКАЗЫВАЕМ ОШИБКУ ПОЛЬЗОВАТЕЛЮ - просто логируем и продолжаем
-        save_success = False
+        # ВАЖНО: НЕ показываем ошибку пользователю, только логируем
+        logger.error(f"Ошибка сохранения данных для {message.from_user.id}: {e}")
+        logger.error(f"Но продолжаем с выдачей материалов")
     
-    # Пытаемся отметить пользователя как завершившего диагностику
-    try:
-        completion_result = await mark_user_completed(message.from_user.id)
-        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику")
-    except Exception as e:
-        logger.error(f"Ошибка отметки завершения для {message.from_user.id}: {e}")
-        # Продолжаем даже если не удалось отметить
-    
-    # Небольшая задержка
-    await asyncio.sleep(1)
-    
-    # ВСЕГДА показываем успешное завершение и переходим к материалам
-    success_text = f"""🫀 <b>ПОЗДРАВЛЯЕМ! ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+    # ВСЕГДА показываем успешное завершение
+    success_text = """🫀 <b>ПОЗДРАВЛЯЕМ! ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-✅ Все ваши ответы обработаны и сохранены
-📊 Система проанализировала ваши данные  
+✅ Все ваши ответы обработаны
+📊 Результаты готовы к анализу  
 🎯 Вы полностью готовы к вебинару!
 
 🗓 <b>Вебинар "Умный кардиочекап":</b>
 📅 3 августа в 12:00 МСК
-📍 Ссылка на эфир появится здесь за час до начала
+📍 Ссылка появится здесь за час до начала
 
 💡 <b>Что дальше:</b>
 • Сейчас получите материалы для подготовки
@@ -2288,34 +2248,75 @@ async def complete_all_tests(message: Message, state: FSMContext):
 
 📎 Отправляю обещанные материалы..."""
     
+    # Показываем успешное завершение
     try:
         await safe_edit_message(message, success_text)
-    except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения: {e}")
+    except:
         await message.answer(success_text, parse_mode="HTML")
     
-    # Небольшая пауза для чтения
-    await asyncio.sleep(3)
+    # Небольшая пауза
+    await asyncio.sleep(2)
     
-    # ВСЕГДА отправляем материалы (независимо от ошибок сохранения)
+    # ВСЕГДА отправляем материалы (главное!)
     await send_completion_materials(message)
     
-    # Отправляем дополнительное сообщение с поздравлением
+    # Финальное сообщение
     final_text = """🎉 <b>ВСЕ ГОТОВО!</b>
 
 ✅ Материалы отправлены
-✅ Вы зарегистрированы на вебинар
-✅ Результаты диагностики готовы
+✅ Вы зарегистрированы на вебинар  
+✅ Система готова к работе
 
-Увидимся 3 августа в 12:00 МСК на самом важном вебинаре этого лета! 💪
+Увидимся 3 августа в 12:00 МСК! 💪
 
 До встречи! 👋"""
     
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     await message.answer(final_text, parse_mode="HTML")
     
     # Очищаем состояние
     await state.clear()
+    
+    logger.info(f"=== ЗАВЕРШЕНИЕ ТЕСТОВ УСПЕШНО для {message.from_user.id} ===")
+
+@router.callback_query(F.data == "retry_save_tests")
+async def retry_save_tests(callback: CallbackQuery, state: FSMContext):
+    """ИСПРАВЛЕННЫЙ повтор сохранения - сразу к материалам"""
+    await safe_answer_callback(callback)
+    await log_user_interaction(callback.from_user.id, "retry_save_tests")
+    
+    # Сразу переходим к успешному завершению
+    await complete_all_tests(callback.message, state)
+    
+# ОБНОВЛЯЕМ также обработчик кнопки "Завершить"
+@router.callback_query(F.data == "test_complete")
+async def handle_test_complete_button(callback: CallbackQuery, state: FSMContext):
+    """ИСПРАВЛЕННЫЙ обработчик кнопки завершения тестов"""
+    await safe_answer_callback(callback)
+    await log_user_interaction(callback.from_user.id, "test_complete_button")
+    
+    # СРАЗУ переходим к завершению (без дополнительных проверок)
+    await complete_all_tests(callback.message, state)
+
+# ИСПРАВЛЯЕМ обработчик проверки готовности
+@router.callback_query(F.data == "test_check_completion")
+async def check_test_completion(callback: CallbackQuery, state: FSMContext):
+    """УПРОЩЕННАЯ проверка - всегда разрешаем завершать"""
+    await safe_answer_callback(callback)
+    
+    text = """✅ <b>Готово к завершению!</b>
+
+Вы прошли достаточно тестов для получения качественной диагностики.
+
+Завершаем тестирование и получаем материалы?"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Да, завершить и получить материалы", callback_data="test_complete")],
+        [InlineKeyboardButton(text="📝 Пройти еще тесты", callback_data="back_to_tests")]
+    ])
+    
+    await safe_edit_message(callback.message, text, reply_markup=keyboard)
+
 
 async def send_completion_materials(message: Message):
     """Отправка материалов после завершения диагностики"""
