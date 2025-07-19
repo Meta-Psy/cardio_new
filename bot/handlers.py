@@ -404,36 +404,6 @@ async def status_command(message: Message, state: FSMContext):
             else:
                 text += "\n❌ Опрос не пройден (0/18 вопросов)"
             
-            # Тесты
-            if user.tests_completed:
-                text += "\n✅ Тесты пройдены (7/7 тестов)"
-                if tests and tests.overall_cv_risk_level:
-                    text += f"\n   • Сердечно-сосудистый риск: {tests.overall_cv_risk_level}"
-            else:
-                text += "\n❌ Тесты не пройдены (0/7 тестов)"
-            
-            # Общий статус
-            if user.completed_diagnostic:
-                text += f"""
-
-🎉 <b>ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
-• Дата завершения: {user.last_activity.strftime('%d.%m.%Y') if user.last_activity else 'Неизвестно'}
-• Вы готовы к вебинару!
-
-🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК"""
-            else:
-                text += f"""
-
-⏳ <b>ДИАГНОСТИКА НЕ ЗАВЕРШЕНА</b>
-
-🔄 <b>Следующий шаг:</b>"""
-                if not user.registration_completed:
-                    text += "\n• Завершите регистрацию (/start)"
-                elif not user.survey_completed:
-                    text += "\n• Пройдите опрос (/start)"
-                elif not user.tests_completed:
-                    text += "\n• Пройдите тесты (/start)"
-        
         await message.answer(text, parse_mode="HTML")
         
     except Exception as e:
