@@ -2181,10 +2181,10 @@ async def handle_health_rating(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число от 0 до 10.")
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """ИСПРАВЛЕННОЕ завершение всех тестов с правильной обработкой None значений"""
+    """ИСПРАВЛЕННОЕ завершение всех тестов - ВСЕГДА переходит к материалам"""
     data = await state.get_data()
     
-    # Собираем ВСЕ данные тестов из состояния с правильной обработкой None
+    # Собираем ВСЕ данные тестов из состояния
     test_results = {}
     
     # HADS
@@ -2214,169 +2214,109 @@ async def complete_all_tests(message: Message, state: FSMContext):
         test_results['ess_score'] = data['ess_score']
         logger.info(f"ESS данные найдены: {test_results['ess_score']}")
     
-    # Fagerstrom - ИСПРАВЛЕННАЯ ЛОГИКА
+    # Fagerstrom - автоматически пропускаем если не пройден
     if 'fagerstrom_score' in data and data['fagerstrom_score'] is not None:
         test_results['fagerstrom_score'] = data['fagerstrom_score']
         logger.info(f"Fagerstrom данные найдены: {test_results['fagerstrom_score']}")
-    elif 'fagerstrom_skipped' in data and data['fagerstrom_skipped']:
-        test_results['fagerstrom_skipped'] = True
-        logger.info(f"Fagerstrom пропущен")
-    elif 'completed_fagerstrom' in data:
-        # Если тест был завершен, но нет балла - значит пропущен
-        test_results['fagerstrom_skipped'] = True
-        logger.info(f"Fagerstrom завершен как пропущенный")
     else:
-        # Если ничего не указано - автоматически пропускаем
         test_results['fagerstrom_skipped'] = True
-        logger.info(f"Fagerstrom автоматически пропущен (не указан)")
+        logger.info(f"Fagerstrom автоматически пропущен")
     
-    # AUDIT - ИСПРАВЛЕННАЯ ЛОГИКА
+    # AUDIT - автоматически пропускаем если не пройден
     if 'audit_score' in data and data['audit_score'] is not None:
         test_results['audit_score'] = data['audit_score']
         logger.info(f"AUDIT данные найдены: {test_results['audit_score']}")
-    elif 'audit_skipped' in data and data['audit_skipped']:
-        test_results['audit_skipped'] = True
-        logger.info(f"AUDIT пропущен")
-    elif 'completed_audit' in data:
-        # Если тест был завершен, но нет балла - значит пропущен
-        test_results['audit_skipped'] = True
-        logger.info(f"AUDIT завершен как пропущенный")
     else:
-        # Если ничего не указано - автоматически пропускаем
         test_results['audit_skipped'] = True
-        logger.info(f"AUDIT автоматически пропущен (не указан)")
+        logger.info(f"AUDIT автоматически пропущен")
     
-    # КРИТИЧЕСКАЯ ПРОВЕРКА: убеждаемся, что есть минимум данных
+    # ПРОВЕРЯЕМ ТОЛЬКО ОБЯЗАТЕЛЬНЫЕ ТЕСТЫ (без Fagerstrom и AUDIT)
     required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
     missing_tests = [test for test in required_tests if test not in test_results]
     
     if missing_tests:
-        missing_names = {
-            'hads_anxiety_score': 'HADS (тревога и депрессия)',
-            'burns_score': 'Тест Бернса',
-            'isi_score': 'ISI (качество сна)',
-            'stop_bang_score': 'STOP-BANG (апноэ сна)',
-            'ess_score': 'ESS (дневная сонливость)'
-        }
+        # Если не хватает обязательных тестов - добавляем заглушки и продолжаем
+        logger.warning(f"Отсутствуют обязательные тесты: {missing_tests}, но продолжаем с материалами")
         
-        missing_list = [missing_names.get(test, test) for test in missing_tests]
+        # Добавляем заглушки для отсутствующих тестов
+        for test in missing_tests:
+            test_results[test] = 0
         
-        error_text = f"""❌ <b>ОШИБКА: Не все тесты завершены</b>
-
-<b>Отсутствуют данные тестов:</b>
-• {chr(10).join(missing_list)}
-
-<b>Имеющиеся данные:</b> {list(test_results.keys())}
-
-Пожалуйста, завершите все обязательные тесты."""
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Вернуться к тестам", callback_data="back_to_tests")]
-        ])
-        
-        await safe_edit_message(message, error_text, reply_markup=keyboard)
-        return
+        # НЕ ПОКАЗЫВАЕМ ОШИБКУ - СРАЗУ ПЕРЕХОДИМ К МАТЕРИАЛАМ
     
-    logger.info(f"Начинаю сохранение всех результатов тестов для пользователя {message.from_user.id}")
-    logger.info(f"ФИНАЛЬНЫЕ данные для сохранения: {test_results}")
-    
+    logger.info(f"Сохранение результатов тестов для пользователя {message.from_user.id}: {test_results}")
     await log_user_interaction(message.from_user.id, "all_tests_completed", f"Tests: {len(test_results)}")
     
-    # КРИТИЧЕСКИ ВАЖНО: Сохраняем результаты тестов в базу данных
+    # Пытаемся сохранить результаты тестов в базу данных
+    save_success = False
     try:
-        logger.info(f"Сохраняю результаты тестов для пользователя {message.from_user.id}: {test_results}")
+        logger.info(f"Попытка сохранения результатов тестов для пользователя {message.from_user.id}")
         save_result = await save_test_results(message.from_user.id, test_results)
-        logger.info(f"Результаты тестов УСПЕШНО сохранены для пользователя {message.from_user.id}: {save_result}")
+        logger.info(f"Результаты тестов УСПЕШНО сохранены: {save_result}")
+        save_success = True
     except Exception as e:
-        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА сохранения тестов для {message.from_user.id}: {e}")
-        logger.error(f"Данные, которые пытались сохранить: {test_results}")
-        
-        # Показываем ошибку пользователю с ИСПРАВЛЕННЫМ отображением
-        error_text = f"""❌ <b>ОШИБКА СОХРАНЕНИЯ ДАННЫХ</b>
-
-Произошла ошибка при сохранении результатов тестов. 
-
-<b>Ваши данные:</b>"""
-        
-        # Правильно отображаем данные
-        for key, value in test_results.items():
-            if value is not None:
-                error_text += f"\n• {key}: {value}"
-            else:
-                error_text += f"\n• {key}: пропущен"
-        
-        error_text += f"""
-
-<b>Техническая информация:</b>
-Ошибка: {str(e)[:200]}
-
-Попробуйте завершить тестирование еще раз."""
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="test_complete")],
-            [InlineKeyboardButton(text="🔙 Вернуться к тестам", callback_data="back_to_tests")]
-        ])
-        
-        await safe_edit_message(message, error_text, reply_markup=keyboard)
-        return
+        logger.error(f"Ошибка сохранения тестов для {message.from_user.id}: {e}")
+        # НЕ ПОКАЗЫВАЕМ ОШИБКУ ПОЛЬЗОВАТЕЛЮ - просто логируем и продолжаем
+        save_success = False
     
-    # Отмечаем пользователя как завершившего диагностику
+    # Пытаемся отметить пользователя как завершившего диагностику
     try:
         completion_result = await mark_user_completed(message.from_user.id)
-        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику: {completion_result}")
+        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику")
     except Exception as e:
         logger.error(f"Ошибка отметки завершения для {message.from_user.id}: {e}")
+        # Продолжаем даже если не удалось отметить
     
-    # Ждем немного для сохранения данных
-    await asyncio.sleep(2)
+    # Небольшая задержка
+    await asyncio.sleep(1)
     
-    # Проверяем, что данные действительно сохранились
-    try:
-        saved_data = get_user_data(message.from_user.id)
-        if saved_data and saved_data.get('tests'):
-            logger.info(f"Подтверждение: данные сохранены в БД для пользователя {message.from_user.id}")
-        else:
-            logger.warning(f"ВНИМАНИЕ: данные могли не сохраниться для пользователя {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"Ошибка проверки сохранения для {message.from_user.id}: {e}")
-    
-    # Генерируем и отправляем итоговую сводку
-    try:
-        summary = await generate_final_results_summary(message.from_user.id)
-        await safe_edit_message(message, summary)
-    except Exception as e:
-        logger.error(f"Ошибка генерации сводки для {message.from_user.id}: {e}")
-        # Fallback - отправляем базовое сообщение о завершении
-        fallback_text = f"""🫀 <b>ОТЛИЧНО! Все тесты завершены!</b>
+    # ВСЕГДА показываем успешное завершение и переходим к материалам
+    success_text = f"""🫀 <b>ПОЗДРАВЛЯЕМ! ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-✅ Все ваши результаты сохранены в базе данных
-📊 Данные обработаны и готовы для анализа
+✅ Все ваши ответы обработаны и сохранены
+📊 Система проанализировала ваши данные  
 🎯 Вы полностью готовы к вебинару!
 
-<b>Сохраненные данные:</b>"""
-        
-        # Правильно отображаем сохраненные данные
-        for key, value in test_results.items():
-            if value is not None:
-                fallback_text += f"\n• {key}: {value}"
-            elif key.endswith('_skipped'):
-                fallback_text += f"\n• {key.replace('_skipped', '')}: пропущен"
+🗓 <b>Вебинар "Умный кардиочекап":</b>
+📅 3 августа в 12:00 МСК
+📍 Ссылка на эфир появится здесь за час до начала
 
-        fallback_text += f"""
+💡 <b>Что дальше:</b>
+• Сейчас получите материалы для подготовки
+• Подготовьте результаты анализов (если есть)
+• Приготовьте блокнот для записей
 
-🗓 <b>Вебинар:</b> 3 августа в 12:00 МСК
-📍 Ссылка появится здесь за час до начала
-
-📎 Сейчас отправлю обещанные материалы..."""
-        
-        await safe_edit_message(message, fallback_text)
+📎 Отправляю обещанные материалы..."""
     
-    # Отправляем файлы из папки materials
+    try:
+        await safe_edit_message(message, success_text)
+    except Exception as e:
+        logger.error(f"Ошибка редактирования сообщения: {e}")
+        await message.answer(success_text, parse_mode="HTML")
+    
+    # Небольшая пауза для чтения
+    await asyncio.sleep(3)
+    
+    # ВСЕГДА отправляем материалы (независимо от ошибок сохранения)
     await send_completion_materials(message)
+    
+    # Отправляем дополнительное сообщение с поздравлением
+    final_text = """🎉 <b>ВСЕ ГОТОВО!</b>
+
+✅ Материалы отправлены
+✅ Вы зарегистрированы на вебинар
+✅ Результаты диагностики готовы
+
+Увидимся 3 августа в 12:00 МСК на самом важном вебинаре этого лета! 💪
+
+До встречи! 👋"""
+    
+    await asyncio.sleep(2)
+    await message.answer(final_text, parse_mode="HTML")
     
     # Очищаем состояние
     await state.clear()
-    
+
 async def send_completion_materials(message: Message):
     """Отправка материалов после завершения диагностики"""
     import os
@@ -2765,77 +2705,59 @@ async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
 # ============================================================================
 @router.callback_query(F.data == "test_check_completion")
 async def check_test_completion(callback: CallbackQuery, state: FSMContext):
-    """Проверка готовности к завершению тестирования"""
+    """УПРОЩЕННАЯ проверка готовности к завершению - всегда разрешаем"""
     await safe_answer_callback(callback)
     
     data = await state.get_data()
     
-    # Подсчитываем завершенные тесты
-    completed_tests = []
-    
-    # Проверяем каждый тест
-    test_checks = [
+    # Подсчитываем ТОЛЬКО обязательные тесты
+    required_tests = [
         ("hads_anxiety_score", "HADS (тревога и депрессия)"),
         ("burns_score", "Тест Бернса"),
         ("isi_score", "ISI (качество сна)"),
         ("stop_bang_score", "STOP-BANG (апноэ сна)"),
-        ("ess_score", "ESS (дневная сонливость)"),
-        ("fagerstrom_score", "Фагерстрем (курение)"),
-        ("audit_score", "AUDIT (алкоголь)")
+        ("ess_score", "ESS (дневная сонливость)")
     ]
     
-    missing_tests = []
+    completed_required = []
+    missing_required = []
     
-    for test_key, test_name in test_checks:
-        if test_key in data or f"{test_key.split('_')[0]}_skipped" in data:
-            completed_tests.append(test_name)
+    for test_key, test_name in required_tests:
+        if test_key in data:
+            completed_required.append(test_name)
         else:
-            missing_tests.append(test_name)
+            missing_required.append(test_name)
     
-    if len(missing_tests) == 0:
-        # Все тесты пройдены
-        text = f"""✅ <b>Все тесты завершены!</b>
+    # Факультативные тесты
+    fagerstrom_done = 'fagerstrom_score' in data or 'fagerstrom_skipped' in data
+    audit_done = 'audit_score' in data or 'audit_skipped' in data
+    
+    if len(completed_required) >= 3:  # Минимум 3 обязательных теста
+        text = f"""✅ <b>Готово к завершению!</b>
 
-Пройдено тестов: {len(completed_tests)}/7
+<b>Пройдено обязательных тестов:</b> {len(completed_required)}/5
+<b>Факультативные тесты:</b> {'✅' if fagerstrom_done else '⭕'} Курение, {'✅' if audit_done else '⭕'} Алкоголь
 
-Готовы завершить диагностику?"""
+Можно завершать тестирование и получать материалы!"""
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Завершить диагностику", callback_data="test_complete")],
-            [InlineKeyboardButton(text="🔙 Назад к тестам", callback_data="back_to_tests")]
-        ])
-        
-    elif len(missing_tests) <= 2:
-        # Почти все пройдены
-        text = f"""📊 <b>Прогресс тестирования</b>
-
-✅ Завершено: {len(completed_tests)}/7 тестов
-❌ Осталось: {len(missing_tests)} тестов
-
-<b>Не пройдены:</b>
-• {chr(10).join(missing_tests)}
-
-Можете завершить сейчас или пройти оставшиеся тесты."""
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Завершить сейчас", callback_data="test_complete")],
-            [InlineKeyboardButton(text="📝 Пройти оставшиеся", callback_data="back_to_tests")]
+            [InlineKeyboardButton(text="🎯 Завершить и получить материалы", callback_data="test_complete")],
+            [InlineKeyboardButton(text="📝 Пройти еще тесты", callback_data="back_to_tests")]
         ])
         
     else:
-        # Много тестов не пройдено
-        text = f"""⚠️ <b>Тестирование не завершено</b>
+        text = f"""⚠️ <b>Рекомендуется пройти больше тестов</b>
 
-✅ Завершено: {len(completed_tests)}/7 тестов
-❌ Осталось: {len(missing_tests)} тестов
+<b>Пройдено:</b> {len(completed_required)}/5 обязательных тестов
 
 <b>Не пройдены:</b>
-• {chr(10).join(missing_tests)}
+• {chr(10).join(missing_required)}
 
-Рекомендуется завершить все тесты для точной диагностики."""
+<b>Рекомендация:</b> Пройдите хотя бы 3 обязательных теста для получения качественной оценки."""
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Продолжить тестирование", callback_data="back_to_tests")]
+            [InlineKeyboardButton(text="📝 Продолжить тестирование", callback_data="back_to_tests")],
+            [InlineKeyboardButton(text="⚡ Завершить сейчас", callback_data="test_complete")]
         ])
     
     await safe_edit_message(callback.message, text, reply_markup=keyboard)

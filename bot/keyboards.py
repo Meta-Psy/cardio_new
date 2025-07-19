@@ -234,7 +234,7 @@ def get_health_advice_keyboard(selected: List[str]):
     return keyboard
 
 def get_test_selection_keyboard(completed_data=None):
-    """УЛУЧШЕННАЯ клавиатура для выбора тестов с правильной проверкой"""
+    """ОБНОВЛЕННАЯ клавиатура для выбора тестов - более либеральная логика завершения"""
     if completed_data is None:
         completed_data = {}
     
@@ -249,17 +249,17 @@ def get_test_selection_keyboard(completed_data=None):
         ("😴 Тест ESS (дневная сонливость)", "test_ess", ["ess_score", "completed_ess"])
     ]
     
+    completed_count = 0
     for text, callback_data, check_keys in tests:
-        # Проверяем, завершен ли тест (любой из ключей)
+        # Проверяем, завершен ли тест
         completed = any(key in completed_data for key in check_keys)
-        
         if completed:
-            prefix = "✅ "
-        else:
-            prefix = "⭕ "
+            completed_count += 1
+        
+        prefix = "✅ " if completed else "⭕ "
         buttons.append([InlineKeyboardButton(text=prefix + text, callback_data=callback_data)])
     
-    # Фагерстрем (с возможностью пропуска)
+    # Фагерстрем (необязательный)
     fagerstrom_keys = ["fagerstrom_score", "fagerstrom_skipped", "completed_fagerstrom"]
     fagerstrom_completed = any(key in completed_data for key in fagerstrom_keys)
     
@@ -272,7 +272,7 @@ def get_test_selection_keyboard(completed_data=None):
         buttons.append([InlineKeyboardButton(text="⭕ 🚬 Тест Фагерстрема (никотиновая зависимость)", callback_data="test_fagerstrom")])
         buttons.append([InlineKeyboardButton(text="⏭ Я не курю", callback_data="test_fagerstrom_skip")])
     
-    # AUDIT (с возможностью пропуска)
+    # AUDIT (необязательный)
     audit_keys = ["audit_score", "audit_skipped", "completed_audit"]
     audit_completed = any(key in completed_data for key in audit_keys)
     
@@ -285,16 +285,13 @@ def get_test_selection_keyboard(completed_data=None):
         buttons.append([InlineKeyboardButton(text="⭕ 🍷 Тест AUDIT (употребление алкоголя)", callback_data="test_audit")])
         buttons.append([InlineKeyboardButton(text="⏭ Я не употребляю алкоголь", callback_data="test_audit_skip")])
     
-    # Проверяем готовность к завершению
-    required_tests_completed = sum(1 for _, _, check_keys in tests if any(key in completed_data for key in check_keys))
-    optional_tests_completed = fagerstrom_completed and audit_completed
-    
-    # Кнопки завершения
-    if required_tests_completed == 5 and optional_tests_completed:
-        # Все тесты пройдены
+    # УПРОЩЕННАЯ логика кнопок завершения
+    if completed_count >= 5:  # Все 5 обязательных тестов пройдены
+        buttons.append([InlineKeyboardButton(text="🎯 Завершить и получить материалы", callback_data="test_complete")])
+    elif completed_count >= 3:  # Минимум 3 теста пройдено
         buttons.append([InlineKeyboardButton(text="✅ Завершить тестирование", callback_data="test_complete")])
-    elif required_tests_completed >= 3:
-        # Хотя бы 3 теста пройдено
+        buttons.append([InlineKeyboardButton(text="📝 Пройти еще тесты", callback_data="test_check_completion")])
+    elif completed_count >= 1:  # Хотя бы 1 тест пройден
         buttons.append([InlineKeyboardButton(text="🔄 Проверить готовность", callback_data="test_check_completion")])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
