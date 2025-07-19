@@ -19,27 +19,50 @@ load_dotenv()
 
 # Настройка логирования без эмодзи для совместимости с Windows
 def setup_logging():
-    """Настройка логирования с учетом кодировки системы"""
+    """Настройка логирования с учетом кодировки Windows"""
     
     # Определяем формат без эмодзи
     log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    # Настройка для файла
-    file_handler = logging.FileHandler('bot.log', encoding='utf-8')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter(log_format))
-    
-    # Настройка для консоли
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(logging.Formatter(log_format))
-    
-    # Настройка корневого логгера
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[file_handler, console_handler],
-        format=log_format
-    )
+    try:
+        # Настройка для файла с UTF-8
+        file_handler = logging.FileHandler('bot.log', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        
+        # Настройка для консоли с безопасной кодировкой
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(logging.Formatter(log_format))
+        
+        # Для Windows устанавливаем безопасную кодировку
+        if sys.platform.startswith('win'):
+            import locale
+            import codecs
+            
+            # Попытка установить UTF-8 кодировку для Windows
+            try:
+                # Для Python 3.7+
+                if hasattr(sys.stdout, 'reconfigure'):
+                    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+                    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+                else:
+                    # Для старых версий Python
+                    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+                    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+            except:
+                # Если ничего не помогает, используем безопасную кодировку
+                pass
+    except Exception as e:
+        # Fallback для проблемных систем
+        logging.basicConfig(
+            level=logging.INFO,
+            format=log_format,
+            handlers=[
+                logging.FileHandler('bot.log', encoding='utf-8', errors='replace'),
+                logging.StreamHandler()
+            ]
+        )
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -410,20 +433,26 @@ def check_environment():
     return True
 
 def print_startup_banner():
-    """Красивый баннер при запуске"""
+    """Упрощенный баннер без Unicode символов для совместимости с Windows"""
     banner = """
-╔══════════════════════════════════════════════════════════════╗
-║                   КАРДИОЧЕКАП БОТ v2.0                      ║
-║                  С ЗАЩИТОЙ ОТ ЗАЦИКЛИВАНИЯ                  ║
-╠══════════════════════════════════════════════════════════════╣
-║  • Middleware защиты состояний                              ║
-║  • Дедупликация действий пользователей                      ║
-║  • Защита от спама и переполнения                           ║
-║  • Безопасное редактирование сообщений                      ║
-║  • Логирование всех взаимодействий                          ║
-╚══════════════════════════════════════════════════════════════╝
+====================================================================
+                   CARDIO CHECKUP BOT v2.0                       
+                  C ZASHCHITOY OT ZATSIKLIVANIYA                 
+====================================================================
+  * Middleware zashchity sostoyaniy                              
+  * Deduplikatsiya deystviy polzovateley                         
+  * Zashchita ot spama i perepolneniya                           
+  * Bezopasnoe redaktirovanie soobshcheniy                       
+  * Logirovanie vsekh vzaimodeystviy                             
+====================================================================
 """
-    print(banner)
+    try:
+        print(banner)
+    except UnicodeEncodeError:
+        # Fallback для старых систем
+        print("CARDIO CHECKUP BOT v2.0 - Starting...")
+        print("System protection enabled")
+
 
 if __name__ == "__main__":
     try:
@@ -438,8 +467,11 @@ if __name__ == "__main__":
         asyncio.run(main())
         
     except KeyboardInterrupt:
-        print("ОСТАНОВКА: Бот остановлен пользователем")
+        print("STOP: Bot stopped by user")
     except Exception as e:
-        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА при запуске бота: {e}")
-        print(f"Ошибка: {e}")
+        try:
+            logger.error(f"Critical error during bot startup: {e}")
+        except:
+            # Если даже логгер не работает
+            print(f"Critical error: {e}")
         exit(1)

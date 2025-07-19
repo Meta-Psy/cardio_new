@@ -131,8 +131,8 @@ class StateProtectionMiddleware:
         """Проверка, является ли действие административным"""
         
         # Список административных команд и callback'ов
-        admin_commands = ['/admin', 'admin', '/stats', 'stats', '/export', 'export', '/broadcast', 'broadcast']
-        admin_callbacks = ['admin_', 'export_', 'stats_', 'broadcast_', 'login_admin', 'admin_login']
+        admin_commands = ['/admin', '/stats', '/export', '/broadcast', '/adminhelp']
+        admin_callbacks = ['admin_', 'export_', 'stats_', 'broadcast_', 'clean_']
         
         # Проверяем текстовые команды
         if hasattr(event, 'text') and event.text:
@@ -1790,16 +1790,127 @@ async def show_current_question(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("answer_"))
 async def handle_test_answer(callback: CallbackQuery, state: FSMContext):
-    """Обработка ответа на вопрос теста"""
+    """Обработка ответа на вопрос теста с защитой от потери состояния"""
     await safe_answer_callback(callback)
     
     data = await state.get_data()
-    current_test = data['current_test']
-    current_index = data['current_question_index']
-    answers = data['test_answers']
+    
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: если состояние потеряно, восстанавливаем контекст
+    if 'current_test' not in data:
+        logger.warning(f"Потеряно состояние для пользователя {callback.from_user.id}. Пытаюсь восстановить.")
+        
+        # Проверяем текущее состояние FSM
+        current_fsm_state = await state.get_state()
+        
+        if current_fsm_state:
+            # Пытаемся определить тест по состоянию FSM
+            if "hads_test" in current_fsm_state:
+                await state.update_data(current_test="hads")
+                # Восстанавливаем базовую структуру
+                from surveys import get_hads_questions
+                questions = get_hads_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "burns_test" in current_fsm_state:
+                await state.update_data(current_test="burns")
+                from surveys import get_burns_questions
+                questions = get_burns_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "isi_test" in current_fsm_state:
+                await state.update_data(current_test="isi")
+                from surveys import get_isi_questions
+                questions = get_isi_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "stop_bang_test" in current_fsm_state:
+                await state.update_data(current_test="stop_bang")
+                from surveys import get_stop_bang_questions
+                questions = get_stop_bang_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "ess_test" in current_fsm_state:
+                await state.update_data(current_test="ess")
+                from surveys import get_ess_questions
+                questions = get_ess_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "fagerstrom_test" in current_fsm_state:
+                await state.update_data(current_test="fagerstrom")
+                from surveys import get_fagerstrom_questions
+                questions = get_fagerstrom_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            elif "audit_test" in current_fsm_state:
+                await state.update_data(current_test="audit")
+                from surveys import get_audit_questions
+                questions = get_audit_questions()
+                await state.update_data(
+                    test_questions=questions,
+                    current_question_index=0,
+                    test_answers=[]
+                )
+            else:
+                # Не можем восстановить - возвращаем к выбору тестов
+                await safe_edit_message(
+                    callback.message,
+                    "❌ Произошла ошибка. Вернитесь к выбору тестов.",
+                    reply_markup=get_test_selection_keyboard()
+                )
+                await state.set_state(UserStates.test_selection)
+                return
+        else:
+            # Совсем потеряно состояние - предлагаем начать заново
+            await safe_edit_message(
+                callback.message,
+                "❌ Сессия прервана. Выберите тест для прохождения заново:",
+                reply_markup=get_test_selection_keyboard()
+            )
+            await state.set_state(UserStates.test_selection)
+            return
+        
+        # Перезагружаем данные после восстановления
+        data = await state.get_data()
+    
+    # Получаем данные теста
+    current_test = data.get('current_test')
+    current_index = data.get('current_question_index', 0)
+    answers = data.get('test_answers', [])
+    
+    if not current_test:
+        await safe_edit_message(
+            callback.message,
+            "❌ Ошибка состояния теста. Начните тест заново:",
+            reply_markup=get_test_selection_keyboard()
+        )
+        await state.set_state(UserStates.test_selection)
+        return
     
     # Извлекаем оценку из callback_data
-    score = int(callback.data.split("_")[1])
+    try:
+        score = int(callback.data.split("_")[1])
+    except (IndexError, ValueError):
+        await safe_answer_callback(callback, "❌ Некорректный ответ", show_alert=True)
+        return
+    
     answers.append(score)
     
     await log_user_interaction(callback.from_user.id, f"{current_test}_answer", f"Q{current_index+1}: {score}")
@@ -1809,10 +1920,11 @@ async def handle_test_answer(callback: CallbackQuery, state: FSMContext):
         current_question_index=current_index + 1
     )
     
+    # Продолжаем показывать следующий вопрос
     await show_current_question(callback.message, state)
 
 async def complete_current_test(message: Message, state: FSMContext):
-    """Завершение текущего теста"""
+    """Завершение текущего теста с гарантированным сохранением результата"""
     data = await state.get_data()
     current_test = data['current_test']
     answers = data['test_answers']
@@ -1825,44 +1937,57 @@ async def complete_current_test(message: Message, state: FSMContext):
         # Для HADS нужно разделить на тревогу и депрессию
         from surveys import calculate_hads_scores, get_hads_interpretation
         anxiety_score, depression_score = calculate_hads_scores(answers)
+        
+        # КРИТИЧЕСКИ ВАЖНО: сохраняем в состояние ВСЕ результаты HADS
         await state.update_data(
             hads_anxiety_score=anxiety_score,
             hads_depression_score=depression_score,
             hads_score=total_score
         )
         result_text = get_hads_interpretation(anxiety_score, depression_score)
+        
     elif current_test == "burns":
         from surveys import get_burns_interpretation
         await state.update_data(burns_score=total_score)
         result_text = get_burns_interpretation(total_score)
+        
     elif current_test == "isi":
         from surveys import get_isi_interpretation
         await state.update_data(isi_score=total_score)
         result_text = get_isi_interpretation(total_score)
+        
     elif current_test == "stop_bang":
         from surveys import get_stop_bang_interpretation
         await state.update_data(stop_bang_score=total_score)
         result_text = get_stop_bang_interpretation(total_score)
+        
     elif current_test == "ess":
         from surveys import get_ess_interpretation
         await state.update_data(ess_score=total_score)
         result_text = get_ess_interpretation(total_score)
+        
     elif current_test == "fagerstrom":
         from surveys import get_fagerstrom_interpretation
         await state.update_data(fagerstrom_score=total_score)
         result_text = get_fagerstrom_interpretation(total_score)
+        
     elif current_test == "audit":
         from surveys import get_audit_interpretation
         await state.update_data(audit_score=total_score)
         result_text = get_audit_interpretation(total_score)
     
+    # Логируем завершение теста
     await log_user_interaction(message.from_user.id, f"{current_test}_completed", f"Score: {total_score}")
+    
+    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: проверяем что данные действительно сохранились
+    updated_data = await state.get_data()
+    logger.info(f"Тест {current_test} завершен для {message.from_user.id}. Сохранены данные: {list(updated_data.keys())}")
     
     text = f"✅ <b>Тест завершен!</b>\n\n<b>Ваш результат:</b> {total_score} баллов\n\n{result_text}"
     
     keyboard = get_continue_keyboard()
     await safe_edit_message(message, text, reply_markup=keyboard)
-
+    
 @router.callback_query(F.data == "continue_tests")
 async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
     """Продолжить к меню тестов"""
@@ -1871,33 +1996,73 @@ async def continue_to_test_menu(callback: CallbackQuery, state: FSMContext):
     await show_test_menu(callback.message, state)
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """Завершение всех тестов"""
+    """Завершение всех тестов с улучшенной проверкой данных"""
     data = await state.get_data()
     
-    # Проверяем, пройдены ли все обязательные тесты
-    required_tests = ['hads_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
-    missing_tests = []
+    # Собираем все данные тестов, включая текущий завершенный тест
+    test_results = {}
     
-    for test in required_tests:
-        if test not in data:
-            missing_tests.append(test)
+    # HADS
+    if 'hads_anxiety_score' in data and 'hads_depression_score' in data:
+        test_results['hads_anxiety_score'] = data['hads_anxiety_score']
+        test_results['hads_depression_score'] = data['hads_depression_score']
+        test_results['hads_score'] = data.get('hads_score', data['hads_anxiety_score'] + data['hads_depression_score'])
     
-    # Проверяем необязательные тесты
-    if 'fagerstrom_score' not in data and 'fagerstrom_skipped' not in data:
-        missing_tests.append('fagerstrom_score')
+    # Burns
+    if 'burns_score' in data:
+        test_results['burns_score'] = data['burns_score']
     
-    if 'audit_score' not in data and 'audit_skipped' not in data:
-        missing_tests.append('audit_score')
+    # ISI
+    if 'isi_score' in data:
+        test_results['isi_score'] = data['isi_score']
+    
+    # STOP-BANG
+    if 'stop_bang_score' in data:
+        test_results['stop_bang_score'] = data['stop_bang_score']
+    
+    # ESS
+    if 'ess_score' in data:
+        test_results['ess_score'] = data['ess_score']
+    
+    # Fagerstrom
+    if 'fagerstrom_score' in data:
+        test_results['fagerstrom_score'] = data['fagerstrom_score']
+    elif 'fagerstrom_skipped' in data:
+        test_results['fagerstrom_skipped'] = True
+    
+    # AUDIT
+    if 'audit_score' in data:
+        test_results['audit_score'] = data['audit_score']
+    elif 'audit_skipped' in data:
+        test_results['audit_skipped'] = True
+    
+    # Проверяем минимальные требования (хотя бы 5 основных тестов)
+    required_tests = ['hads_anxiety_score', 'burns_score', 'isi_score', 'stop_bang_score', 'ess_score']
+    missing_tests = [test for test in required_tests if test not in test_results]
     
     if missing_tests:
-        await message.answer("Пожалуйста, завершите все тесты перед продолжением.")
+        missing_names = {
+            'hads_anxiety_score': 'HADS (тревога и депрессия)',
+            'burns_score': 'Тест Бернса',
+            'isi_score': 'ISI (качество сна)',
+            'stop_bang_score': 'STOP-BANG (апноэ сна)',
+            'ess_score': 'ESS (дневная сонливость)'
+        }
+        
+        missing_list = [missing_names.get(test, test) for test in missing_tests]
+        await safe_edit_message(message, 
+            f"❌ Не завершены обязательные тесты:\n• " + "\n• ".join(missing_list) + 
+            "\n\nПожалуйста, завершите все тесты перед продолжением."
+        )
         return
     
-    await log_user_interaction(message.from_user.id, "all_tests_completed")
+    await log_user_interaction(message.from_user.id, "all_tests_completed", f"Tests: {len(test_results)}")
     
     # Сохраняем результаты тестов в базу данных
     try:
-        await save_test_results(message.from_user.id, data)
+        logger.info(f"Сохраняю результаты тестов для пользователя {message.from_user.id}: {test_results}")
+        await save_test_results(message.from_user.id, test_results)
+        logger.info(f"Результаты тестов успешно сохранены для пользователя {message.from_user.id}")
     except Exception as e:
         logger.error(f"Ошибка сохранения тестов для {message.from_user.id}: {e}")
         await safe_edit_message(message, "❌ Ошибка сохранения результатов. Попробуйте /restart")
@@ -1906,6 +2071,7 @@ async def complete_all_tests(message: Message, state: FSMContext):
     # Отмечаем пользователя как завершившего диагностику
     try:
         await mark_user_completed(message.from_user.id)
+        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший диагностику")
     except Exception as e:
         logger.error(f"Ошибка отметки завершения для {message.from_user.id}: {e}")
     

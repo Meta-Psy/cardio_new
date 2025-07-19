@@ -366,18 +366,11 @@ async def admin_logout(callback: CallbackQuery, state: FSMContext, is_admin: boo
     await callback.message.edit_text(text, parse_mode="HTML")
 
 async def check_admin_auth(callback: CallbackQuery, state: FSMContext, is_admin: bool) -> bool:
-    """Проверка авторизации администратора"""
+    """Проверка авторизации администратора БЕЗ очистки состояния"""
     if not is_admin:
         await callback.answer("❌ Нет прав доступа", show_alert=True)
         return False
-    
-    admin_session = await state.get_data()
-    if not admin_session.get('admin_authenticated'):
-        await callback.answer("❌ Требуется авторизация", show_alert=True)
-        text = "🔐 Сессия истекла. Используйте команду /admin для повторного входа."
-        await callback.message.edit_text(text)
-        return False
-    
+
     return True
 
 # Команды для быстрого доступа
@@ -388,12 +381,7 @@ async def quick_stats(message: Message, state: FSMContext, is_admin: bool = Fals
         await message.answer("❌ У вас нет прав администратора.")
         return
     
-    # Проверяем авторизацию
-    admin_session = await state.get_data()
-    if not admin_session.get('admin_authenticated'):
-        await message.answer("❌ Требуется авторизация. Используйте /admin для входа.")
-        return
-    
+    # УБИРАЕМ проверку admin_authenticated - полагаемся только на is_admin
     try:
         stats = await admin_get_stats()
         
@@ -415,6 +403,7 @@ async def quick_stats(message: Message, state: FSMContext, is_admin: bool = Fals
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
+
 @admin_router.message(Command("export"))
 async def quick_export(message: Message, state: FSMContext, is_admin: bool = False):
     """Быстрый экспорт данных"""
@@ -422,12 +411,7 @@ async def quick_export(message: Message, state: FSMContext, is_admin: bool = Fal
         await message.answer("❌ У вас нет прав администратора.")
         return
     
-    # Проверяем авторизацию
-    admin_session = await state.get_data()
-    if not admin_session.get('admin_authenticated'):
-        await message.answer("❌ Требуется авторизация. Используйте /admin для входа.")
-        return
-    
+    # УБИРАЕМ проверку admin_authenticated
     await message.answer("⏳ Подготавливаю экспорт...")
     
     try:
@@ -445,7 +429,7 @@ async def quick_export(message: Message, state: FSMContext, is_admin: bool = Fal
             
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-
+        
 # Помощь по командам администратора
 @admin_router.message(Command("adminhelp"))
 async def admin_help(message: Message, state: FSMContext, is_admin: bool = False):
