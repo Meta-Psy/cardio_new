@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  cardio_bot:
+    build: .
+    container_name: cardio_bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+    volumes:
+      - ./data:/app/data
+      - ./exports:/app/exports
+    working_dir: /app
+    command: python main.py
