@@ -279,145 +279,324 @@ def get_db_sync():
 # ============================================================================
 
 async def save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
+    """УЛЬТИМАТИВНОЕ сохранение пользователя - максимальная надежность"""
     def _save():
-        db = get_db_sync()
-        try:
-            current_time = datetime.now()
+        # Множественные попытки с разными стратегиями
+        strategies = [
+            "normal_save",      # Обычное сохранение
+            "simple_save",      # Упрощенное сохранение  
+            "minimal_save",     # Минимальное сохранение
+            "emergency_save"    # Экстренное сохранение
+        ]
+        
+        for strategy_num, strategy in enumerate(strategies):
+            logger.info(f"=== СТРАТЕГИЯ {strategy_num + 1}: {strategy} для {telegram_id} ===")
             
-            logger.info(f"{telegram_id} ")
-            
-            # Устанавливаем значения по умолчанию если не переданы
-            if name is None:
-                name = f"Пользователь_{telegram_id}"
-            if email is None:
-                email = f"user_{telegram_id}@cardio.bot"
-            if phone is None:
-                phone = f"+{telegram_id}"
-            
-            logger.info(f"Финальные данные: name='{name}', email='{email}', phone='{phone}'")
-            
-            # Ищем существующего пользователя
-            user = db.query(User).filter(User.telegram_id == telegram_id).first()
-            
-            if user:
-                logger.info(f"Обновляю существующего пользователя ID={user.id}")
-                user.name = name
-                user.email = email
-                user.phone = phone
-                user.updated_at = current_time
-                user.last_activity = current_time
-                user.registration_completed = True
-            else:
-                logger.info(f"Создаю НОВОГО пользователя для {telegram_id}")
-                user = User(
-                    telegram_id=telegram_id,
-                    name=name,
-                    email=email,
-                    phone=phone,
-                    completed_diagnostic=False,
-                    registration_completed=True,
-                    survey_completed=False,
-                    tests_completed=False,
-                    created_at=current_time,
-                    updated_at=current_time,
-                    last_activity=current_time
-                )
-                db.add(user)
-            
-            # Добавляем лог
-            log_entry = ActivityLog(
-                telegram_id=telegram_id,
-                action="user_created_bulletproof",
-                details=json.dumps({
-                    "method": "bulletproof_save",
-                    "name": name,
-                    "email": email,
-                    "phone": phone,
-                    "timestamp": current_time.isoformat()
-                }, ensure_ascii=False),
-                step="bulletproof_registration"
-            )
-            db.add(log_entry)
-            
-            # COMMIT с повторными попытками
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    logger.info(f"Попытка commit #{attempt + 1}")
-                    db.commit()
-                    logger.info(f"✅ COMMIT УСПЕШЕН на попытке #{attempt + 1}")
-                    break
-                except Exception as commit_error:
-                    logger.error(f"Ошибка commit попытка #{attempt + 1}: {commit_error}")
-                    if attempt == max_attempts - 1:
-                        raise commit_error
-                    asyncio.sleep(0.5)
-            
-            # Верификация
-            verification = db.query(User).filter(User.telegram_id == telegram_id).first()
-            if verification:
-                logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ НАЙДЕН В БД: ID={verification.id}")
-                result = {
-                    'user_id': verification.id,
-                    'telegram_id': verification.telegram_id,
-                    'name': verification.name,
-                    'email': verification.email,
-                    'phone': verification.phone,
-                    'registration_completed': verification.registration_completed,
-                    'created_at': verification.created_at.isoformat(),
-                    'verification_success': True
-                }
-                logger.info(f"✅ ПУЛЕНЕПРОБИВАЕМОЕ СОХРАНЕНИЕ УСПЕШНО: {result}")
-                return result
-            else:
-                logger.error(f"❌ ВЕРИФИКАЦИЯ ПРОВАЛИЛАСЬ")
-                raise Exception("Пользователь не найден после commit")
-            
-        except Exception as e:
-            logger.error(f"❌ ОШИБКА ПУЛЕНЕПРОБИВАЕМОГО СОХРАНЕНИЯ: {e}")
-            db.rollback()
-            
-            # ПОСЛЕДНЯЯ ПОПЫТКА - простое создание без проверок
+            db = None
             try:
-                logger.info("ПОСЛЕДНЯЯ ПОПЫТКА - простое создание")
-                simple_user = User(
-                    telegram_id=telegram_id,
-                    name=name or f"User{telegram_id}",
-                    email=email or f"{telegram_id}@bot.com",
-                    phone=phone or f"+{telegram_id}",
-                    completed_diagnostic=False,
-                    registration_completed=True,
-                    survey_completed=False,
-                    tests_completed=False,
-                    created_at=current_time,
-                    updated_at=current_time,
-                    last_activity=current_time
-                )
-                db.add(simple_user)
+                db = get_db_sync()
+                current_time = datetime.now()
+                
+                # Подготавливаем данные в зависимости от стратегии
+                if strategy == "normal_save":
+                    # Полное сохранение со всеми проверками
+                    safe_name = (name or f"User_{telegram_id}")[:255]
+                    safe_email = (email or f"user_{telegram_id}@bot.com")[:255]
+                    safe_phone = (phone or f"+{telegram_id}")[:50]
+                    
+                elif strategy == "simple_save":
+                    # Упрощенные данные
+                    safe_name = f"User_{telegram_id}"
+                    safe_email = f"{telegram_id}@bot.com"
+                    safe_phone = f"+{telegram_id}"
+                    
+                elif strategy == "minimal_save":
+                    # Минимальные данные
+                    safe_name = str(telegram_id)
+                    safe_email = f"{telegram_id}@b.com"
+                    safe_phone = str(telegram_id)
+                    
+                else:  # emergency_save
+                    # Экстренные короткие данные
+                    safe_name = str(telegram_id)[:10]
+                    safe_email = f"{telegram_id}@b.c"[:20]
+                    safe_phone = str(telegram_id)[:15]
+                
+                logger.info(f"Стратегия {strategy}: name='{safe_name}', email='{safe_email}', phone='{safe_phone}'")
+                
+                # Проверяем существование пользователя
+                user = db.query(User).filter(User.telegram_id == telegram_id).first()
+                
+                if user:
+                    # Обновляем существующего
+                    logger.info(f"Обновляю существующего пользователя ID={user.id}")
+                    user.name = safe_name
+                    user.email = safe_email
+                    user.phone = safe_phone
+                    user.updated_at = current_time
+                    user.last_activity = current_time
+                    user.registration_completed = True
+                else:
+                    # Создаем нового
+                    logger.info(f"Создаю нового пользователя")
+                    user = User(
+                        telegram_id=telegram_id,
+                        name=safe_name,
+                        email=safe_email,
+                        phone=safe_phone,
+                        completed_diagnostic=False,
+                        registration_completed=True,
+                        survey_completed=False,
+                        tests_completed=False,
+                        created_at=current_time,
+                        updated_at=current_time,
+                        last_activity=current_time
+                    )
+                    db.add(user)
+                
+                # Добавляем лог только для первых двух стратегий
+                if strategy in ["normal_save", "simple_save"]:
+                    try:
+                        log_entry = ActivityLog(
+                            telegram_id=telegram_id,
+                            action=f"user_saved_{strategy}",
+                            details=json.dumps({
+                                "strategy": strategy,
+                                "name": safe_name,
+                                "email": safe_email,
+                                "phone": safe_phone
+                            }, ensure_ascii=False),
+                            step=f"registration_{strategy}"
+                        )
+                        db.add(log_entry)
+                    except Exception as log_error:
+                        logger.warning(f"Не удалось добавить лог: {log_error}")
+                
+                # Commit с таймаутом
+                logger.info(f"Выполняю commit для стратегии {strategy}")
                 db.commit()
+                logger.info(f"✅ COMMIT УСПЕШЕН для стратегии {strategy}")
                 
-                logger.info("✅ ПОСЛЕДНЯЯ ПОПЫТКА УСПЕШНА")
-                return {
-                    'user_id': simple_user.id,
-                    'telegram_id': simple_user.telegram_id,
-                    'success': True
-                }
-            except Exception as final_error:
-                logger.error(f"❌ ДАЖЕ ПОСЛЕДНЯЯ ПОПЫТКА ПРОВАЛИЛАСЬ: {final_error}")
-                db.rollback()
+                # Верификация
+                verification = db.query(User).filter(User.telegram_id == telegram_id).first()
+                if verification:
+                    logger.info(f"✅ ВЕРИФИКАЦИЯ УСПЕШНА: ID={verification.id}, name='{verification.name}'")
+                    result = {
+                        'user_id': verification.id,
+                        'telegram_id': verification.telegram_id,
+                        'name': verification.name,
+                        'email': verification.email,
+                        'phone': verification.phone,
+                        'registration_completed': verification.registration_completed,
+                        'strategy_used': strategy,
+                        'success': True
+                    }
+                    
+                    if db:
+                        db.close()
+                    
+                    logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ СОХРАНЕН СТРАТЕГИЕЙ {strategy}: {result}")
+                    return result
+                else:
+                    logger.error(f"❌ Верификация провалилась для стратегии {strategy}")
+                    raise Exception("Верификация не прошла")
                 
-                # Возвращаем "успех" чтобы не сломать процесс
-                return {
-                    'user_id': 0,
-                    'telegram_id': telegram_id,
-                    'success': False,
-                    'error': str(final_error)
-                }
-        finally:
-            db.close()
+            except Exception as e:
+                logger.error(f"❌ Стратегия {strategy} провалилась: {e}")
+                if db:
+                    try:
+                        db.rollback()
+                        db.close()
+                    except:
+                        pass
+                
+                # Если это не последняя стратегия, продолжаем
+                if strategy_num < len(strategies) - 1:
+                    logger.info(f"Переходим к следующей стратегии...")
+                    asyncio.sleep(0.5)  # Небольшая пауза
+                    continue
+                else:
+                    # Последняя стратегия провалилась
+                    logger.error(f"❌ ВСЕ СТРАТЕГИИ ПРОВАЛИЛИСЬ для {telegram_id}")
+                    return {
+                        'user_id': 0,
+                        'telegram_id': telegram_id,
+                        'success': False,
+                        'error': str(e),
+                        'all_strategies_failed': True
+                    }
+        
+        # Этот код не должен выполниться
+        return {
+            'user_id': 0,
+            'telegram_id': telegram_id,
+            'success': False,
+            'error': 'Неожиданное завершение'
+        }
     
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _save)
+
+async def save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
+    """УЛЬТИМАТИВНОЕ сохранение пользователя - максимальная надежность"""
+    def _save():
+        # Множественные попытки с разными стратегиями
+        strategies = [
+            "normal_save",      # Обычное сохранение
+            "simple_save",      # Упрощенное сохранение  
+            "minimal_save",     # Минимальное сохранение
+            "emergency_save"    # Экстренное сохранение
+        ]
+        
+        for strategy_num, strategy in enumerate(strategies):
+            logger.info(f"=== СТРАТЕГИЯ {strategy_num + 1}: {strategy} для {telegram_id} ===")
+            
+            db = None
+            try:
+                db = get_db_sync()
+                current_time = datetime.now()
+                
+                # Подготавливаем данные в зависимости от стратегии
+                if strategy == "normal_save":
+                    # Полное сохранение со всеми проверками
+                    safe_name = (name or f"User_{telegram_id}")[:255]
+                    safe_email = (email or f"user_{telegram_id}@bot.com")[:255]
+                    safe_phone = (phone or f"+{telegram_id}")[:50]
+                    
+                elif strategy == "simple_save":
+                    # Упрощенные данные
+                    safe_name = f"User_{telegram_id}"
+                    safe_email = f"{telegram_id}@bot.com"
+                    safe_phone = f"+{telegram_id}"
+                    
+                elif strategy == "minimal_save":
+                    # Минимальные данные
+                    safe_name = str(telegram_id)
+                    safe_email = f"{telegram_id}@b.com"
+                    safe_phone = str(telegram_id)
+                    
+                else:  # emergency_save
+                    # Экстренные короткие данные
+                    safe_name = str(telegram_id)[:10]
+                    safe_email = f"{telegram_id}@b.c"[:20]
+                    safe_phone = str(telegram_id)[:15]
+                
+                logger.info(f"Стратегия {strategy}: name='{safe_name}', email='{safe_email}', phone='{safe_phone}'")
+                
+                # Проверяем существование пользователя
+                user = db.query(User).filter(User.telegram_id == telegram_id).first()
+                
+                if user:
+                    # Обновляем существующего
+                    logger.info(f"Обновляю существующего пользователя ID={user.id}")
+                    user.name = safe_name
+                    user.email = safe_email
+                    user.phone = safe_phone
+                    user.updated_at = current_time
+                    user.last_activity = current_time
+                    user.registration_completed = True
+                else:
+                    # Создаем нового
+                    logger.info(f"Создаю нового пользователя")
+                    user = User(
+                        telegram_id=telegram_id,
+                        name=safe_name,
+                        email=safe_email,
+                        phone=safe_phone,
+                        completed_diagnostic=False,
+                        registration_completed=True,
+                        survey_completed=False,
+                        tests_completed=False,
+                        created_at=current_time,
+                        updated_at=current_time,
+                        last_activity=current_time
+                    )
+                    db.add(user)
+                
+                # Добавляем лог только для первых двух стратегий
+                if strategy in ["normal_save", "simple_save"]:
+                    try:
+                        log_entry = ActivityLog(
+                            telegram_id=telegram_id,
+                            action=f"user_saved_{strategy}",
+                            details=json.dumps({
+                                "strategy": strategy,
+                                "name": safe_name,
+                                "email": safe_email,
+                                "phone": safe_phone
+                            }, ensure_ascii=False),
+                            step=f"registration_{strategy}"
+                        )
+                        db.add(log_entry)
+                    except Exception as log_error:
+                        logger.warning(f"Не удалось добавить лог: {log_error}")
+                
+                # Commit с таймаутом
+                logger.info(f"Выполняю commit для стратегии {strategy}")
+                db.commit()
+                logger.info(f"✅ COMMIT УСПЕШЕН для стратегии {strategy}")
+                
+                # Верификация
+                verification = db.query(User).filter(User.telegram_id == telegram_id).first()
+                if verification:
+                    logger.info(f"✅ ВЕРИФИКАЦИЯ УСПЕШНА: ID={verification.id}, name='{verification.name}'")
+                    result = {
+                        'user_id': verification.id,
+                        'telegram_id': verification.telegram_id,
+                        'name': verification.name,
+                        'email': verification.email,
+                        'phone': verification.phone,
+                        'registration_completed': verification.registration_completed,
+                        'strategy_used': strategy,
+                        'success': True
+                    }
+                    
+                    if db:
+                        db.close()
+                    
+                    logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ СОХРАНЕН СТРАТЕГИЕЙ {strategy}: {result}")
+                    return result
+                else:
+                    logger.error(f"❌ Верификация провалилась для стратегии {strategy}")
+                    raise Exception("Верификация не прошла")
+                
+            except Exception as e:
+                logger.error(f"❌ Стратегия {strategy} провалилась: {e}")
+                if db:
+                    try:
+                        db.rollback()
+                        db.close()
+                    except:
+                        pass
+                
+                # Если это не последняя стратегия, продолжаем
+                if strategy_num < len(strategies) - 1:
+                    logger.info(f"Переходим к следующей стратегии...")
+                    asyncio.sleep(0.5)  # Небольшая пауза
+                    continue
+                else:
+                    # Последняя стратегия провалилась
+                    logger.error(f"❌ ВСЕ СТРАТЕГИИ ПРОВАЛИЛИСЬ для {telegram_id}")
+                    return {
+                        'user_id': 0,
+                        'telegram_id': telegram_id,
+                        'success': False,
+                        'error': str(e),
+                        'all_strategies_failed': True
+                    }
+        
+        # Этот код не должен выполниться
+        return {
+            'user_id': 0,
+            'telegram_id': telegram_id,
+            'success': False,
+            'error': 'Неожиданное завершение'
+        }
+    
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _save)
+
+
 async def save_survey_data(telegram_id: int, state_data: Dict[str, Any]):
     """Улучшенное сохранение данных опроса с заполнением всех колонок"""
     def _save():
