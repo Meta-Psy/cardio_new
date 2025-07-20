@@ -418,26 +418,126 @@ def merge_duplicate_users():
     finally:
         db.close()
 
+def find_existing_user_safe(telegram_id: int, email: str = None, phone: str = None):
+    """БЕЗОПАСНАЯ функция поиска пользователя"""
+    db = get_db_sync()
+    try:
+        print(f"🔍 БЕЗОПАСНЫЙ ПОИСК пользователя:")
+        print(f"   ищем telegram_id: {telegram_id}")
+        print(f"   email: {email}")
+        print(f"   phone: {phone}")
+        
+        # 1. СНАЧАЛА точный поиск по telegram_id
+        user = db.query(User).filter(User.telegram_id == telegram_id).first()
+        if user:
+            print(f"✅ НАЙДЕН точно по telegram_id: {user.id}")
+            return user
+        
+        # 2. Поиск по email (ТОЛЬКО если это НЕ автогенерированный email)
+        if email and '@' in email and not email.endswith('@bot.com'):
+            user = db.query(User).filter(User.email == email).first()
+            if user:
+                print(f"🔄 НАЙДЕН по email, ОБНОВЛЯЮ telegram_id с {user.telegram_id} на {telegram_id}")
+                
+                # Обновляем связанные записи ПЕРЕД изменением telegram_id
+                old_telegram_id = user.telegram_id
+                
+                surveys_updated = db.query(Survey).filter(Survey.telegram_id == old_telegram_id).update({Survey.telegram_id: telegram_id})
+                tests_updated = db.query(TestResult).filter(TestResult.telegram_id == old_telegram_id).update({TestResult.telegram_id: telegram_id})
+                activities_updated = db.query(ActivityLog).filter(ActivityLog.telegram_id == old_telegram_id).update({ActivityLog.telegram_id: telegram_id})
+                
+                print(f"   Обновлено связанных записей: опросы={surveys_updated}, тесты={tests_updated}, активность={activities_updated}")
+                
+                # ТЕПЕРЬ обновляем telegram_id в пользователе
+                user.telegram_id = telegram_id
+                
+                db.commit()
+                print(f"✅ telegram_id обновлен на {telegram_id}")
+                return user
+        
+        # 3. Поиск по телефону (только реальные номера)
+        if phone and len(phone) >= 10:
+            clean_phone = ''.join(filter(str.isdigit, phone))[-10:]
+            
+            # Ищем только среди пользователей с реальными телефонами
+            users_with_phones = db.query(User).filter(
+                User.phone.isnot(None),
+                ~User.phone.like('+%'),  # Исключаем автогенерированные телефоны
+                User.phone != f"+{telegram_id}"
+            ).all()
+            
+            for user in users_with_phones:
+                if user.phone:
+                    user_phone = ''.join(filter(str.isdigit, user.phone))[-10:]
+                    if user_phone == clean_phone and len(user_phone) >= 10:
+                        print(f"🔄 НАЙДЕН по телефону, ОБНОВЛЯЮ telegram_id с {user.telegram_id} на {telegram_id}")
+                        
+                        # Обновляем связанные записи
+                        old_telegram_id = user.telegram_id
+                        
+                        db.query(Survey).filter(Survey.telegram_id == old_telegram_id).update({Survey.telegram_id: telegram_id})
+                        db.query(TestResult).filter(TestResult.telegram_id == old_telegram_id).update({TestResult.telegram_id: telegram_id})
+                        db.query(ActivityLog).filter(ActivityLog.telegram_id == old_telegram_id).update({ActivityLog.telegram_id: telegram_id})
+                        
+                        user.telegram_id = telegram_id
+                        db.commit()
+                        return user
+        
+        print(f"❌ Пользователь НЕ НАЙДЕН")
+        return None
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ ОШИБКА поиска: {e}")
+        logger.error(f"❌ ОШИБКА поиска: {e}")
+        return None
+    finally:
+        db.close()
+        
 async def safe_save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
-    """БЕЗОПАСНАЯ функция сохранения пользователя с гарантией правильного telegram_id"""
+    """ЭКСТРЕННО ИСПРАВЛЕННАЯ функция сохранения"""
+    
+    # ПРОВЕРЯЕМ входящий telegram_id
+    if not isinstance(telegram_id, int):
+        logger.error(f"❌ telegram_id не является int: {telegram_id}, type: {type(telegram_id)}")
+        raise ValueError(f"telegram_id должен быть int, получен {type(telegram_id)}")
+    
+    if telegram_id <= 0:
+        logger.error(f"❌ Некорректный telegram_id: {telegram_id}")
+        raise ValueError(f"telegram_id должен быть положительным числом, получен {telegram_id}")
+    
+    print("=" * 80)
+    print("💾 ЭКСТРЕННОЕ СОХРАНЕНИЕ В БД")
+    print(f"💾 ВХОДЯЩИЙ telegram_id: {telegram_id}")
+    print(f"💾 type(telegram_id): {type(telegram_id)}")
+    print(f"💾 name: {name}")
+    print(f"💾 email: {email}")
+    print(f"💾 phone: {phone}")
+    print("=" * 80)
     
     def _save():
         db = get_db_sync()
         try:
             current_time = datetime.now()
             
-            logger.info(f"=== БЕЗОПАСНОЕ СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЯ {telegram_id} ===")
+            print(f"🔍 ВНУТРИ _save(): telegram_id = {telegram_id}")
+            logger.info(f"🔍 ВНУТРИ _save(): telegram_id = {telegram_id}")
             
-            # СНАЧАЛА ИЩЕМ СУЩЕСТВУЮЩЕГО ПОЛЬЗОВАТЕЛЯ
-            existing_user = find_existing_user(telegram_id, email, phone)
+            # ПОИСК существующего пользователя с ДЕТАЛЬНЫМ логированием
+            existing_user = find_existing_user_safe(telegram_id, email, phone)
             
             if existing_user:
-                # ОБНОВЛЯЕМ существующего
-                logger.info(f"✅ Обновляю существующего пользователя ID={existing_user.id}")
+                print(f"✅ Найден существующий пользователь:")
+                print(f"   ID в БД: {existing_user.id}")
+                print(f"   СТАРЫЙ telegram_id: {existing_user.telegram_id}")
+                print(f"   УСТАНАВЛИВАЮ НА: {telegram_id}")
                 
-                # ГАРАНТИРУЕМ правильный telegram_id
+                # ПРИНУДИТЕЛЬНО устанавливаем правильный telegram_id
                 existing_user.telegram_id = telegram_id
                 
+                print(f"   ПОСЛЕ УСТАНОВКИ: {existing_user.telegram_id}")
+                
+                # Обновляем остальные данные
                 if name and name != f"User_{telegram_id}":
                     existing_user.name = name
                 if email and email != f"user_{telegram_id}@bot.com":
@@ -451,10 +551,10 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
                 user = existing_user
                 
             else:
-                # СОЗДАЕМ нового ТОЛЬКО если не нашли
-                logger.info(f"🆕 Создаю нового пользователя с telegram_id={telegram_id}")
+                print(f"🆕 СОЗДАЮ НОВОГО пользователя с telegram_id: {telegram_id}")
+                
                 user = User(
-                    telegram_id=telegram_id,  # НАСТОЯЩИЙ telegram_id
+                    telegram_id=telegram_id,
                     name=name or f"User_{telegram_id}",
                     email=email or f"user_{telegram_id}@bot.com",
                     phone=phone or f"+{telegram_id}",
@@ -467,40 +567,60 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
                     last_activity=current_time
                 )
                 db.add(user)
+                
+                print(f"   СОЗДАН объект с telegram_id: {user.telegram_id}")
             
-            # КРИТИЧЕСКИ ВАЖНО: Проверяем что telegram_id правильный
-            assert user.telegram_id == telegram_id, f"ОШИБКА: telegram_id не соответствует! {user.telegram_id} != {telegram_id}"
+            # ОКОНЧАТЕЛЬНАЯ ПРОВЕРКА ПЕРЕД COMMIT
+            print(f"🔍 ПЕРЕД COMMIT:")
+            print(f"   user.telegram_id: {user.telegram_id}")
+            print(f"   ожидаемый: {telegram_id}")
+            print(f"   равны? {user.telegram_id == telegram_id}")
+            
+            if user.telegram_id != telegram_id:
+                raise Exception(f"КРИТИЧЕСКАЯ ОШИБКА: telegram_id изменился! {user.telegram_id} != {telegram_id}")
             
             # Логируем операцию
             log_entry = ActivityLog(
-                telegram_id=telegram_id,  # НАСТОЯЩИЙ telegram_id
-                action="user_saved_safe",
+                telegram_id=telegram_id,
+                action="user_saved_emergency",
                 details=json.dumps({
-                    "method": "safe_save",
-                    "existing_found": existing_user is not None
+                    "method": "emergency_save",
+                    "input_telegram_id": telegram_id,
+                    "final_telegram_id": user.telegram_id
                 }, ensure_ascii=False),
-                step="safe_registration"
+                step="emergency_registration"
             )
             db.add(log_entry)
             
+            print("🔍 ВЫПОЛНЯЮ COMMIT...")
             db.commit()
+            print("✅ COMMIT ВЫПОЛНЕН")
             
-            # ФИНАЛЬНАЯ ПРОВЕРКА
+            # ФИНАЛЬНАЯ ВЕРИФИКАЦИЯ
             verification = db.query(User).filter(User.telegram_id == telegram_id).first()
-            if not verification:
+            if verification:
+                print(f"✅ ВЕРИФИКАЦИЯ УСПЕШНА:")
+                print(f"   ID в БД: {verification.id}")
+                print(f"   telegram_id: {verification.telegram_id}")
+                
+                return {
+                    'user_id': verification.id,
+                    'telegram_id': verification.telegram_id,
+                    'success': True
+                }
+            else:
+                # Если не найден - ищем всех пользователей
+                all_users = db.query(User).all()
+                print(f"❌ ВЕРИФИКАЦИЯ ПРОВАЛЕНА! Все пользователи в БД:")
+                for u in all_users[-3:]:
+                    print(f"   ID: {u.id}, telegram_id: {u.telegram_id}, name: {u.name}")
+                
                 raise Exception(f"Пользователь с telegram_id={telegram_id} не найден после сохранения!")
-            
-            logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ СОХРАНЕН: ID={verification.id}, telegram_id={verification.telegram_id}")
-            
-            return {
-                'user_id': verification.id,
-                'telegram_id': verification.telegram_id,
-                'success': True
-            }
             
         except Exception as e:
             db.rollback()
-            logger.error(f"❌ Ошибка сохранения пользователя {telegram_id}: {e}")
+            print(f"❌ ОШИБКА: {e}")
+            logger.error(f"❌ ОШИБКА: {e}")
             raise e
         finally:
             db.close()
@@ -510,9 +630,8 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
 
 
 async def save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
-    """Обертка для безопасной функции сохранения"""
+    """Перенаправление на безопасную функцию"""
     return await safe_save_user_data(telegram_id, name, email, phone)
-
 
 
 async def save_survey_data(telegram_id: int, state_data: Dict[str, Any]):

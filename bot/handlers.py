@@ -871,74 +871,86 @@ async def handle_email(message: Message, state: FSMContext):
 
 @router.message(StateFilter(UserStates.waiting_phone))
 async def handle_phone(message: Message, state: FSMContext):
-    """ИСПРАВЛЕННАЯ обработка телефона - гарантия сохранения под НАСТОЯЩИМ telegram_id"""
+    """ЭКСТРЕННОЕ ИСПРАВЛЕНИЕ - правильный telegram_id"""
     
-    REAL_TELEGRAM_ID = message.from_user.id  # НАСТОЯЩИЙ telegram_id из Telegram
+    # КРИТИЧЕСКИ ВАЖНО: ТОЛЬКО из message.from_user.id
+    CORRECT_TELEGRAM_ID = message.from_user.id
     
-    await log_user_interaction(REAL_TELEGRAM_ID, "phone_processing")
+    print("=" * 80)
+    print("🚨 ЭКСТРЕННАЯ ОТЛАДКА TELEGRAM_ID")
+    print(f"✅ ПРАВИЛЬНЫЙ telegram_id: {CORRECT_TELEGRAM_ID}")
+    print(f"📱 from_user.id: {message.from_user.id}")
+    print(f"💬 chat.id: {message.chat.id}")
+    print(f"👤 username: {message.from_user.username}")
+    print("=" * 80)
     
-    # Проверяем, отправлен ли контакт
+    logger.info("=" * 80)
+    logger.info("🚨 ЭКСТРЕННАЯ ОТЛАДКА TELEGRAM_ID")
+    logger.info(f"✅ ПРАВИЛЬНЫЙ telegram_id: {CORRECT_TELEGRAM_ID}")
+    logger.info(f"📱 from_user.id: {message.from_user.id}")
+    logger.info(f"💬 chat.id: {message.chat.id}")
+    logger.info("=" * 80)
+    
+    await log_user_interaction(CORRECT_TELEGRAM_ID, "phone_processing")
+    
+    # Проверяем контакт
     if message.contact:
         phone = message.contact.phone_number
         
-        # Проверяем, что это его собственный номер
-        if message.contact.user_id != REAL_TELEGRAM_ID:
-            await message.answer(
-                "❌ Пожалуйста, отправьте свой собственный номер телефона.",
-                reply_markup=ReplyKeyboardMarkup(
-                    keyboard=[[KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]],
-                    resize_keyboard=True,
-                    one_time_keyboard=True
-                )
-            )
+        # КРИТИЧЕСКАЯ ПРОВЕРКА: contact.user_id должен совпадать с from_user.id
+        print(f"🔍 contact.user_id: {message.contact.user_id}")
+        print(f"🔍 from_user.id: {message.from_user.id}")
+        print(f"🔍 Совпадают? {message.contact.user_id == message.from_user.id}")
+        
+        if message.contact.user_id != CORRECT_TELEGRAM_ID:
+            print(f"❌ НЕСООТВЕТСТВИЕ! contact.user_id={message.contact.user_id}, from_user.id={CORRECT_TELEGRAM_ID}")
+            await message.answer("❌ Пожалуйста, отправьте свой собственный номер телефона.")
             return
     else:
-        await message.answer(
-            "📱 Пожалуйста, используйте кнопку ниже для отправки номера телефона:",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[[KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]],
-                resize_keyboard=True,
-                one_time_keyboard=True
-            )
-        )
+        await message.answer("📱 Пожалуйста, используйте кнопку для отправки номера телефона.")
         return
     
-    # Убираем клавиатуру
     await message.answer("Данные получены! Обрабатываю...", reply_markup=ReplyKeyboardRemove())
-    
-    # Сохраняем телефон в состоянии
     await state.update_data(phone=phone)
     
-    # Получаем все данные
+    # Получаем данные из состояния
     data = await state.get_data()
-    name = data.get('name', f'Пользователь_{REAL_TELEGRAM_ID}')
-    email = data.get('email', f'user_{REAL_TELEGRAM_ID}@bot.com')
+    name = data.get('name', f'Пользователь_{CORRECT_TELEGRAM_ID}')
+    email = data.get('email', f'user_{CORRECT_TELEGRAM_ID}@bot.com')
     
-    logger.info(f"=== СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЯ ПОД НАСТОЯЩИМ ID: {REAL_TELEGRAM_ID} ===")
+    print(f"🔍 Данные для сохранения:")
+    print(f"   telegram_id: {CORRECT_TELEGRAM_ID}")
+    print(f"   name: {name}")
+    print(f"   email: {email}")
+    print(f"   phone: {phone}")
     
     try:
-        # ИСПОЛЬЗУЕМ БЕЗОПАСНУЮ ФУНКЦИЮ СОХРАНЕНИЯ
+        # ИСПОЛЬЗУЕМ ТОЛЬКО ПРАВИЛЬНЫЙ ID
         save_result = await safe_save_user_data(
-            telegram_id=REAL_TELEGRAM_ID,  # НАСТОЯЩИЙ telegram_id
+            telegram_id=CORRECT_TELEGRAM_ID,  # ТОЛЬКО ПРАВИЛЬНЫЙ ID
             name=name,
             email=email,
             phone=phone
         )
         
+        print(f"✅ Результат сохранения: {save_result}")
+        logger.info(f"✅ Результат сохранения: {save_result}")
+        
         if save_result['success']:
-            logger.info(f"✅ Пользователь сохранен: {save_result}")
-            success_message = "✅ Отлично! Регистрация завершена успешно!"
+            success_message = "✅ Отлично! Регистрация завершена!"
         else:
             success_message = "✅ Данные получены! Продолжаем..."
         
         await message.answer(success_message)
         
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения: {e}")
+        print(f"❌ ОШИБКА сохранения: {e}")
+        logger.error(f"❌ ОШИБКА сохранения: {e}")
         await message.answer("✅ Данные получены! Продолжаем...")
     
-    # ПЕРЕХОДИМ К ОПРОСУ
+    # Переход к опросу
     await start_survey(message, state)
+
 # ============================================================================
 # ОБРАБОТЧИКИ ОПРОСА (ПОЛНЫЕ ОРИГИНАЛЬНЫЕ)
 # ============================================================================
