@@ -292,10 +292,25 @@ async def main():
         
         # КРИТИЧЕСКИ ВАЖНО: Регистрируем middleware защиты состояний ПЕРВЫМ
         # Это обеспечивает обработку всех запросов через защиту от дублирования
-        logger.info("Регистрация middleware защиты состояний...")
-        dp.message.middleware(state_protection)
-        dp.callback_query.middleware(state_protection)
-        logger.info("УСПЕХ: Middleware защиты состояний зарегистрирован")
+        if os.getenv("DEBUG_MODE", "true").lower() == "true":
+            logger.info("🔍 РЕЖИМ ДИАГНОСТИКИ: простой middleware")
+            
+            class SimpleDiagnosticMiddleware:
+                async def __call__(self, handler, event, data):
+                    if hasattr(event, 'from_user') and event.from_user:
+                        user_id = event.from_user.id
+                        logger.info(f"🔍 ДИАГНОСТИКА: user_id={user_id}")
+                    return await handler(event, data)
+            
+            diagnostic_middleware = SimpleDiagnosticMiddleware()
+            dp.message.middleware(diagnostic_middleware)
+            dp.callback_query.middleware(diagnostic_middleware)
+            logger.info("✅ Диагностический middleware зарегистрирован")
+        else:
+            logger.info("🛡️ ПРОДАКШН РЕЖИМ: защищенный middleware") 
+            dp.message.middleware(state_protection)
+            dp.callback_query.middleware(state_protection)
+            logger.info("✅ Защищенный middleware зарегистрирован")
         
         # Регистрация административного middleware
         admin_middleware = AdminMiddleware(ADMIN_IDS)

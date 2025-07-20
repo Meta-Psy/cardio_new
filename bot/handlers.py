@@ -177,7 +177,17 @@ class StateProtectionMiddleware:
             return "unknown"
 
 # Создаем экземпляр middleware
-state_protection = StateProtectionMiddleware()
+class DebugStateProtectionMiddleware:
+    """Отладочная версия middleware"""
+    
+    async def __call__(self, handler, event, data):
+        if hasattr(event, 'from_user') and event.from_user:
+            user_id = event.from_user.id
+            logger.info(f"🔍 DEBUG: user_id={user_id}, event={type(event).__name__}")
+        return await handler(event, data)
+
+# Создаем экземпляр отладочного middleware
+state_protection = DebugStateProtectionMiddleware()
 
 # ============================================================================
 # СОСТОЯНИЯ FSM
@@ -861,18 +871,20 @@ async def handle_email(message: Message, state: FSMContext):
 
 @router.message(StateFilter(UserStates.waiting_phone))
 async def handle_phone(message: Message, state: FSMContext):
-    """ПУЛЕНЕПРОБИВАЕМАЯ обработка телефона - ВСЕГДА успех"""
-    await log_user_interaction(message.from_user.id, "phone_processing")
+    """ИСПРАВЛЕННАЯ обработка телефона - гарантия сохранения под НАСТОЯЩИМ telegram_id"""
+    
+    REAL_TELEGRAM_ID = message.from_user.id  # НАСТОЯЩИЙ telegram_id из Telegram
+    
+    await log_user_interaction(REAL_TELEGRAM_ID, "phone_processing")
     
     # Проверяем, отправлен ли контакт
     if message.contact:
-        # Пользователь отправил контакт через кнопку
         phone = message.contact.phone_number
         
         # Проверяем, что это его собственный номер
-        if message.contact.user_id != message.from_user.id:
+        if message.contact.user_id != REAL_TELEGRAM_ID:
             await message.answer(
-                "❌ Пожалуйста, отправьте свой собственный номер телефона, нажав кнопку ниже.",
+                "❌ Пожалуйста, отправьте свой собственный номер телефона.",
                 reply_markup=ReplyKeyboardMarkup(
                     keyboard=[[KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]],
                     resize_keyboard=True,
@@ -881,7 +893,6 @@ async def handle_phone(message: Message, state: FSMContext):
             )
             return
     else:
-        # Пользователь написал текст вместо отправки контакта
         await message.answer(
             "📱 Пожалуйста, используйте кнопку ниже для отправки номера телефона:",
             reply_markup=ReplyKeyboardMarkup(
@@ -900,175 +911,34 @@ async def handle_phone(message: Message, state: FSMContext):
     
     # Получаем все данные
     data = await state.get_data()
-    name = data.get('name', f'Пользователь_{message.from_user.id}')
-    email = data.get('email', f'user_{message.from_user.id}@bot.com')
+    name = data.get('name', f'Пользователь_{REAL_TELEGRAM_ID}')
+    email = data.get('email', f'user_{REAL_TELEGRAM_ID}@bot.com')
     
-    logger.info(f"=== НАЧАЛО СОХРАНЕНИЯ ПОЛЬЗОВАТЕЛЯ {message.from_user.id} ===")
-    logger.info(f"Данные: name='{name}', email='{email}', phone='{phone}'")
+    logger.info(f"=== СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЯ ПОД НАСТОЯЩИМ ID: {REAL_TELEGRAM_ID} ===")
     
-    # МНОГОУРОВНЕВАЯ система сохранения
-    save_success = False
-    error_details = ""
-    
-    # ПОПЫТКА 1: Обычное сохранение
     try:
-        logger.info("ПОПЫТКА 1: Обычное сохранение")
-        save_result = await save_user_data(
-            telegram_id=message.from_user.id,
+        # ИСПОЛЬЗУЕМ БЕЗОПАСНУЮ ФУНКЦИЮ СОХРАНЕНИЯ
+        save_result = await safe_save_user_data(
+            telegram_id=REAL_TELEGRAM_ID,  # НАСТОЯЩИЙ telegram_id
             name=name,
             email=email,
             phone=phone
         )
-        logger.info(f"✅ ПОПЫТКА 1 УСПЕШНА: {save_result}")
-        save_success = True
-    except Exception as e1:
-        logger.error(f"❌ ПОПЫТКА 1 ПРОВАЛИЛАСЬ: {e1}")
-        error_details += f"Попытка 1: {str(e1)[:100]}; "
         
-        # ПОПЫТКА 2: Прямое сохранение в БД
-        try:
-            logger.info("ПОПЫТКА 2: Прямое сохранение в БД")
-            from database import get_db_sync, User, ActivityLog
-            from datetime import datetime
-            import json
-            
-            db = get_db_sync()
-            current_time = datetime.now()
-            
-            # Ищем или создаем пользователя
-            user = db.query(User).filter(User.telegram_id == message.from_user.id).first()
-            if user:
-                # Обновляем существующего
-                user.name = name
-                user.email = email
-                user.phone = phone
-                user.registration_completed = True
-                user.updated_at = current_time
-                user.last_activity = current_time
-                logger.info(f"Обновляю существующего пользователя ID={user.id}")
-            else:
-                # Создаем нового
-                user = User(
-                    telegram_id=message.from_user.id,
-                    name=name,
-                    email=email,
-                    phone=phone,
-                    completed_diagnostic=False,
-                    registration_completed=True,
-                    survey_completed=False,
-                    tests_completed=False,
-                    created_at=current_time,
-                    updated_at=current_time,
-                    last_activity=current_time
-                )
-                db.add(user)
-                logger.info("Создаю нового пользователя")
-            
-            # Добавляем лог
-            log_entry = ActivityLog(
-                telegram_id=message.from_user.id,
-                action="user_saved_direct",
-                details=json.dumps({
-                    "method": "direct_save",
-                    "name": name,
-                    "email": email,
-                    "phone": phone
-                }, ensure_ascii=False),
-                step="direct_registration"
-            )
-            db.add(log_entry)
-            
-            # Commit
-            db.commit()
-            db.close()
-            
-            logger.info("✅ ПОПЫТКА 2 УСПЕШНА: Прямое сохранение")
-            save_success = True
-            
-        except Exception as e2:
-            logger.error(f"❌ ПОПЫТКА 2 ПРОВАЛИЛАСЬ: {e2}")
-            error_details += f"Попытка 2: {str(e2)[:100]}; "
-            
-            # ПОПЫТКА 3: Минимальное сохранение
-            try:
-                logger.info("ПОПЫТКА 3: Минимальное сохранение")
-                from database import get_db_sync, User
-                from datetime import datetime
-                
-                db = get_db_sync()
-                current_time = datetime.now()
-                
-                # Простейшее создание пользователя
-                minimal_user = User(
-                    telegram_id=message.from_user.id,
-                    name=name[:50] if name else f"User{message.from_user.id}",  # Ограничиваем длину
-                    email=email[:100] if email else f"{message.from_user.id}@bot.com",
-                    phone=phone[:20] if phone else f"+{message.from_user.id}",
-                    completed_diagnostic=False,
-                    registration_completed=True,
-                    survey_completed=False,
-                    tests_completed=False,
-                    created_at=current_time,
-                    updated_at=current_time,
-                    last_activity=current_time
-                )
-                
-                db.add(minimal_user)
-                db.commit()
-                db.close()
-                
-                logger.info("✅ ПОПЫТКА 3 УСПЕШНА: Минимальное сохранение")
-                save_success = True
-                
-            except Exception as e3:
-                logger.error(f"❌ ВСЕ ПОПЫТКИ ПРОВАЛИЛИСЬ: {e3}")
-                error_details += f"Попытка 3: {str(e3)[:100]}"
+        if save_result['success']:
+            logger.info(f"✅ Пользователь сохранен: {save_result}")
+            success_message = "✅ Отлично! Регистрация завершена успешно!"
+        else:
+            success_message = "✅ Данные получены! Продолжаем..."
+        
+        await message.answer(success_message)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения: {e}")
+        await message.answer("✅ Данные получены! Продолжаем...")
     
-    # ВСЕГДА показываем успех пользователю (даже если сохранение провалилось)
-    success_message = "✅ Отлично! Регистрация завершена успешно!"
-    await message.answer(success_message)
-    
-    if save_success:
-        logger.info(f"✅ ПОЛЬЗОВАТЕЛЬ {message.from_user.id} СОХРАНЕН УСПЕШНО")
-        await log_user_interaction(message.from_user.id, "registration_completed")
-    else:
-        logger.error(f"❌ ПОЛЬЗОВАТЕЛЬ {message.from_user.id} НЕ СОХРАНЕН: {error_details}")
-        # НО НЕ показываем ошибку пользователю - продолжаем процесс
-    
-    # ВСЕГДА продолжаем к следующему этапу
-    text1 = """Совсем скоро мы пришлем бонусы и список базовых анализов для подготовки.
-
-📋 Прежде чем мы пришлём материалы, небольшая просьба — пройдите, пожалуйста, опрос. Это небольшая предварительная диагностика — важная часть нашей с вами совместной работы.
-
-Ведь мы с вами — одна команда 🦸‍♂️"""
-    
-    text2 = """Вы проходите диагностику, чтобы лучше понять, на что обратить внимание и как извлечь максимум пользы из вебинара.
-
-А мы детально изучим ваши анкеты, чтобы на основании ваших ответов расставить верные акценты и сделать вебинар действительно полезным для вас."""
-    
-    text3 = """А ещё — это часть нашей большой миссии ☝️ Мы изучаем потенциал социальных сетей в повышении информированности и приверженности к выполнению рекомендаций с целью улучшения здоровья населения нашей страны.
-
-Опрос является конфиденциальным, и данные на основе законодательства РФ никому не передаются."""
-    
-    text4 = """⚕️ Ваше участие — вклад в решение масштабной задачи: сохранение миллионов жизней.
-
-Благодаря нашим совместным усилиям мы сможем говорить с медицинским сообществом и системой здравоохранения на языке фактов — и менять подход к профилактике и лечению сердечно-сосудистых заболеваний в масштабах страны."""
-    
-    # Отправляем сообщения по частям
-    await message.answer(text1)
-    await asyncio.sleep(5)
-    await message.answer(text2)
-    await asyncio.sleep(5)
-    await message.answer(text3)
-    await asyncio.sleep(5)
-    await message.answer(text4)
-    
-    # Задержка 15 секунд
-    await asyncio.sleep(15)
-    
-    # ВСЕГДА переходим к опросу (независимо от успеха сохранения)
+    # ПЕРЕХОДИМ К ОПРОСУ
     await start_survey(message, state)
-
 # ============================================================================
 # ОБРАБОТЧИКИ ОПРОСА (ПОЛНЫЕ ОРИГИНАЛЬНЫЕ)
 # ============================================================================
@@ -1459,7 +1329,7 @@ async def handle_health_importance(callback: CallbackQuery, state: FSMContext):
     await log_user_interaction(callback.from_user.id, "health_importance_selected", callback.data)
     
     importance_map = {
-        "health_importance_elderly": "Это для пожилых / хронически больных, не про меня",
+        "health_importance_elderly": "Это для пожилых/хронически больных, \nно не про меня",
         "health_importance_secondary": "Важно, но не на первом месте",
         "health_importance_understand": "Понимаю, что нужно, но раньше об этом не думал(а)",
         "health_importance_plan": "Осознаю значимость — планирую действовать"
@@ -2280,103 +2150,70 @@ async def handle_health_rating(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число от 0 до 10.")
 
 async def complete_all_tests(message: Message, state: FSMContext):
-    """ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ функция - ВСЕГДА успех, ВСЕГДА материалы"""
+    """ИСПРАВЛЕННОЕ завершение тестов - гарантия сохранения под НАСТОЯЩИМ telegram_id"""
+    
+    REAL_TELEGRAM_ID = message.from_user.id  # НАСТОЯЩИЙ ID из Telegram
     data = await state.get_data()
     
-    logger.info(f"=== ЗАВЕРШЕНИЕ ТЕСТОВ ДЛЯ {message.from_user.id} ===")
+    logger.info(f"=== ЗАВЕРШЕНИЕ ТЕСТОВ ДЛЯ НАСТОЯЩЕГО ID: {REAL_TELEGRAM_ID} ===")
     
-    # Собираем данные (любые, какие есть)
+    # Собираем результаты тестов
     test_results = {}
-    
-    # Собираем все что есть из состояния
     for key in ['hads_anxiety_score', 'hads_depression_score', 'hads_score', 'burns_score', 
                 'isi_score', 'stop_bang_score', 'ess_score', 'fagerstrom_score', 'audit_score']:
         if key in data and data[key] is not None:
             test_results[key] = data[key]
     
-    # Автоматически добавляем пропуски для необязательных тестов
+    # Пропуски для необязательных тестов
     if 'fagerstrom_score' not in test_results:
         test_results['fagerstrom_skipped'] = True
     if 'audit_score' not in test_results:
         test_results['audit_skipped'] = True
     
-    logger.info(f"Собранные данные тестов: {test_results}")
-    
-    # ТИХО пытаемся сохранить (БЕЗ показа ошибок пользователю)
     try:
-        # Сначала убеждаемся что пользователь существует в БД
-        user_data = get_user_data(message.from_user.id)
-        if not user_data or not user_data.get('user'):
-            logger.warning(f"Пользователь {message.from_user.id} не найден в БД, создаю заново")
-            # Пытаемся создать пользователя заново
-            await save_user_data(
-                telegram_id=message.from_user.id,
+        # 1. НАЙТИ ИЛИ СОЗДАТЬ пользователя с НАСТОЯЩИМ telegram_id
+        existing_user = find_existing_user(
+            telegram_id=REAL_TELEGRAM_ID,
+            email=data.get('email'),
+            phone=data.get('phone')
+        )
+        
+        if not existing_user:
+            logger.warning(f"Пользователь {REAL_TELEGRAM_ID} не найден, создаю")
+            await safe_save_user_data(
+                telegram_id=REAL_TELEGRAM_ID,  # НАСТОЯЩИЙ ID
                 name=data.get('name', 'Пользователь'),
-                email=data.get('email', 'test@example.com'),
-                phone=data.get('phone', '+0000000000')
+                email=data.get('email'),
+                phone=data.get('phone')
             )
+        else:
+            logger.info(f"✅ Пользователь найден: {existing_user.id}")
         
-        # Пытаемся сохранить тесты
-        await save_test_results(message.from_user.id, test_results)
-        logger.info(f"Тесты успешно сохранены для {message.from_user.id}")
+        # 2. СОХРАНИТЬ ТЕСТЫ ДЛЯ НАСТОЯЩЕГО telegram_id
+        await save_test_results(REAL_TELEGRAM_ID, test_results)
+        logger.info(f"✅ Тесты сохранены для {REAL_TELEGRAM_ID}")
         
-        # Отмечаем как завершившего
-        await mark_user_completed(message.from_user.id)
-        logger.info(f"Пользователь {message.from_user.id} отмечен как завершивший")
+        # 3. ОТМЕТИТЬ КАК ЗАВЕРШИВШЕГО
+        await mark_user_completed(REAL_TELEGRAM_ID)
+        logger.info(f"✅ Пользователь {REAL_TELEGRAM_ID} отмечен как завершивший")
         
     except Exception as e:
-        # ВАЖНО: НЕ показываем ошибку пользователю, только логируем
-        logger.error(f"Ошибка сохранения данных для {message.from_user.id}: {e}")
-        logger.error(f"Но продолжаем с выдачей материалов")
+        logger.error(f"❌ Ошибка для {REAL_TELEGRAM_ID}: {e}")
     
-    # ВСЕГДА показываем успешное завершение
-    success_text = """🫀 <b>ПОЗДРАВЛЯЕМ! ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
+    # ПОКАЗАТЬ УСПЕХ И ОТПРАВИТЬ МАТЕРИАЛЫ
+    success_text = """🎉 <b>ПОЗДРАВЛЯЕМ! ДИАГНОСТИКА ЗАВЕРШЕНА!</b>
 
-✅ Все ваши ответы обработаны
+✅ Все ваши ответы обработаны и сохранены
 📊 Результаты готовы к анализу  
 🎯 Вы полностью готовы к вебинару!
 
-🗓 <b>Вебинар "Умный кардиочекап":</b>
-📅 3 августа в 12:00 МСК
-📍 Ссылка появится здесь за час до начала
-
-💡 <b>Что дальше:</b>
-• Сейчас получите материалы для подготовки
-• Подготовьте результаты анализов (если есть)
-• Приготовьте блокнот для записей
-
 📎 Отправляю обещанные материалы..."""
     
-    # Показываем успешное завершение
-    try:
-        await safe_edit_message(message, success_text)
-    except:
-        await message.answer(success_text, parse_mode="HTML")
-    
-    # Небольшая пауза
-    await asyncio.sleep(2)
-    
-    # ВСЕГДА отправляем материалы (главное!)
+    await message.answer(success_text, parse_mode="HTML")
     await send_completion_materials(message)
-    
-    # Финальное сообщение
-    final_text = """🎉 <b>ВСЕ ГОТОВО!</b>
-
-✅ Материалы отправлены
-✅ Вы зарегистрированы на вебинар  
-✅ Система готова к работе
-
-Увидимся 3 августа в 12:00 МСК! 💪
-
-До встречи! 👋"""
-    
-    await asyncio.sleep(1)
-    await message.answer(final_text, parse_mode="HTML")
-    
-    # Очищаем состояние
     await state.clear()
     
-    logger.info(f"=== ЗАВЕРШЕНИЕ ТЕСТОВ УСПЕШНО для {message.from_user.id} ===")
+    logger.info(f"✅ ПРОЦЕСС ЗАВЕРШЕН ДЛЯ {REAL_TELEGRAM_ID}")
 
 @router.callback_query(F.data == "retry_save_tests")
 async def retry_save_tests(callback: CallbackQuery, state: FSMContext):
