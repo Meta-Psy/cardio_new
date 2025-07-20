@@ -418,51 +418,99 @@ def merge_duplicate_users():
     finally:
         db.close()
 
+
 def find_existing_user_safe(telegram_id: int, email: str = None, phone: str = None):
-    """БЕЗОПАСНАЯ функция поиска пользователя"""
+    """ИСПРАВЛЕННАЯ функция поиска пользователя - НЕ МЕНЯЕТ telegram_id если он правильный"""
     db = get_db_sync()
     try:
-        print(f"🔍 БЕЗОПАСНЫЙ ПОИСК пользователя:")
-        print(f"   ищем telegram_id: {telegram_id}")
-        print(f"   email: {email}")
-        print(f"   phone: {phone}")
+        logger.info(f"🔍 ПОИСК пользователя: telegram_id={telegram_id}, email={email}, phone={phone}")
         
-        # 1. СНАЧАЛА точный поиск по telegram_id
+        # 1. СНАЧАЛА точный поиск по telegram_id - ПРИОРИТЕТ!
         user = db.query(User).filter(User.telegram_id == telegram_id).first()
         if user:
-            print(f"✅ НАЙДЕН точно по telegram_id: {user.id}")
+            logger.info(f"✅ НАЙДЕН точно по telegram_id: {user.id}")
             return user
         
         # 2. Поиск по email (ТОЛЬКО если это НЕ автогенерированный email)
         if email and '@' in email and not email.endswith('@bot.com'):
             user = db.query(User).filter(User.email == email).first()
             if user:
-                print(f"🔄 НАЙДЕН по email, ОБНОВЛЯЮ telegram_id с {user.telegram_id} на {telegram_id}")
+                logger.warning(f"🔄 НАЙДЕН по email, НО ПРОВЕРЯЮ какой telegram_id ПРАВИЛЬНЫЙ")
                 
-                # Обновляем связанные записи ПЕРЕД изменением telegram_id
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Определяем какой ID правильный
                 old_telegram_id = user.telegram_id
+                current_telegram_id = telegram_id
                 
-                surveys_updated = db.query(Survey).filter(Survey.telegram_id == old_telegram_id).update({Survey.telegram_id: telegram_id})
-                tests_updated = db.query(TestResult).filter(TestResult.telegram_id == old_telegram_id).update({TestResult.telegram_id: telegram_id})
-                activities_updated = db.query(ActivityLog).filter(ActivityLog.telegram_id == old_telegram_id).update({ActivityLog.telegram_id: telegram_id})
+                # Проверяем, какой из ID выглядит как настоящий telegram_id пользователя
+                # Telegram ID пользователей обычно 8-10 цифр, message_id обычно меньше
                 
-                print(f"   Обновлено связанных записей: опросы={surveys_updated}, тесты={tests_updated}, активность={activities_updated}")
+                def is_real_user_id(user_id: int) -> bool:
+                    """Проверяет, является ли ID настоящим telegram_id пользователя"""
+                    # Telegram user ID обычно больше 100000 и меньше 10^10
+                    return 100000 <= user_id <= 9999999999
                 
-                # ТЕПЕРЬ обновляем telegram_id в пользователе
-                user.telegram_id = telegram_id
+                def is_likely_message_id(msg_id: int) -> bool:
+                    """Проверяет, похож ли ID на message_id"""
+                    # Message ID обычно небольшие числа
+                    return 1 <= msg_id <= 999999
                 
-                db.commit()
-                print(f"✅ telegram_id обновлен на {telegram_id}")
+                logger.info(f"Анализ ID:")
+                logger.info(f"  old_telegram_id: {old_telegram_id} (real_user: {is_real_user_id(old_telegram_id)}, msg_like: {is_likely_message_id(old_telegram_id)})")
+                logger.info(f"  current_telegram_id: {current_telegram_id} (real_user: {is_real_user_id(current_telegram_id)}, msg_like: {is_likely_message_id(current_telegram_id)})")
+                
+                # ЛОГИКА ВЫБОРА ПРАВИЛЬНОГО ID:
+                correct_telegram_id = None
+                
+                if is_real_user_id(old_telegram_id) and is_likely_message_id(current_telegram_id):
+                    # Старый ID - настоящий, новый - message_id
+                    correct_telegram_id = old_telegram_id
+                    logger.info("✅ СОХРАНЯЮ старый telegram_id (он правильный)")
+                    
+                elif is_likely_message_id(old_telegram_id) and is_real_user_id(current_telegram_id):
+                    # Старый ID - message_id, новый - настоящий
+                    correct_telegram_id = current_telegram_id
+                    logger.info("✅ ОБНОВЛЯЮ на новый telegram_id (он правильный)")
+                    
+                elif is_real_user_id(old_telegram_id) and is_real_user_id(current_telegram_id):
+                    # Оба выглядят как настоящие - сохраняем старый (принцип консерватизма)
+                    correct_telegram_id = old_telegram_id
+                    logger.info("🤔 ОБА ID выглядят настоящими, сохраняю СТАРЫЙ")
+                    
+                else:
+                    # Неопределенная ситуация - логируем и выбираем больший
+                    correct_telegram_id = max(old_telegram_id, current_telegram_id)
+                    logger.warning(f"⚠️ НЕОПРЕДЕЛЕННАЯ ситуация, выбираю больший ID: {correct_telegram_id}")
+                
+                # Обновляем только если ID действительно изменился
+                if user.telegram_id != correct_telegram_id:
+                    logger.info(f"🔄 ОБНОВЛЯЮ telegram_id с {user.telegram_id} на {correct_telegram_id}")
+                    
+                    # Обновляем связанные записи ПЕРЕД изменением основного ID
+                    old_id_for_update = user.telegram_id
+                    
+                    surveys_updated = db.query(Survey).filter(Survey.telegram_id == old_id_for_update).update({Survey.telegram_id: correct_telegram_id})
+                    tests_updated = db.query(TestResult).filter(TestResult.telegram_id == old_id_for_update).update({TestResult.telegram_id: correct_telegram_id})
+                    activities_updated = db.query(ActivityLog).filter(ActivityLog.telegram_id == old_id_for_update).update({ActivityLog.telegram_id: correct_telegram_id})
+                    
+                    logger.info(f"   Обновлено связанных записей: опросы={surveys_updated}, тесты={tests_updated}, активность={activities_updated}")
+                    
+                    # ТЕПЕРЬ обновляем основной telegram_id
+                    user.telegram_id = correct_telegram_id
+                    
+                    db.commit()
+                    logger.info(f"✅ telegram_id обновлен на {correct_telegram_id}")
+                else:
+                    logger.info(f"✅ telegram_id уже правильный: {correct_telegram_id}")
+                
                 return user
         
-        # 3. Поиск по телефону (только реальные номера)
+        # 3. Поиск по телефону (аналогично исправляем)
         if phone and len(phone) >= 10:
             clean_phone = ''.join(filter(str.isdigit, phone))[-10:]
             
-            # Ищем только среди пользователей с реальными телефонами
             users_with_phones = db.query(User).filter(
                 User.phone.isnot(None),
-                ~User.phone.like('+%'),  # Исключаем автогенерированные телефоны
+                ~User.phone.like('%@%'),  # Исключаем автогенерированные
                 User.phone != f"+{telegram_id}"
             ).all()
             
@@ -470,32 +518,43 @@ def find_existing_user_safe(telegram_id: int, email: str = None, phone: str = No
                 if user.phone:
                     user_phone = ''.join(filter(str.isdigit, user.phone))[-10:]
                     if user_phone == clean_phone and len(user_phone) >= 10:
-                        print(f"🔄 НАЙДЕН по телефону, ОБНОВЛЯЮ telegram_id с {user.telegram_id} на {telegram_id}")
+                        logger.warning(f"🔄 НАЙДЕН по телефону, проверяю telegram_id")
                         
-                        # Обновляем связанные записи
+                        # Применяем ту же логику выбора правильного ID
                         old_telegram_id = user.telegram_id
+                        current_telegram_id = telegram_id
                         
-                        db.query(Survey).filter(Survey.telegram_id == old_telegram_id).update({Survey.telegram_id: telegram_id})
-                        db.query(TestResult).filter(TestResult.telegram_id == old_telegram_id).update({TestResult.telegram_id: telegram_id})
-                        db.query(ActivityLog).filter(ActivityLog.telegram_id == old_telegram_id).update({ActivityLog.telegram_id: telegram_id})
+                        # Определяем правильный ID
+                        if 100000 <= old_telegram_id <= 9999999999 and 1 <= current_telegram_id <= 999999:
+                            correct_telegram_id = old_telegram_id
+                        elif 1 <= old_telegram_id <= 999999 and 100000 <= current_telegram_id <= 9999999999:
+                            correct_telegram_id = current_telegram_id
+                        else:
+                            correct_telegram_id = old_telegram_id  # Консервативный выбор
                         
-                        user.telegram_id = telegram_id
-                        db.commit()
+                        if user.telegram_id != correct_telegram_id:
+                            # Обновляем связанные записи
+                            db.query(Survey).filter(Survey.telegram_id == user.telegram_id).update({Survey.telegram_id: correct_telegram_id})
+                            db.query(TestResult).filter(TestResult.telegram_id == user.telegram_id).update({TestResult.telegram_id: correct_telegram_id})
+                            db.query(ActivityLog).filter(ActivityLog.telegram_id == user.telegram_id).update({ActivityLog.telegram_id: correct_telegram_id})
+                            
+                            user.telegram_id = correct_telegram_id
+                            db.commit()
+                        
                         return user
         
-        print(f"❌ Пользователь НЕ НАЙДЕН")
+        logger.info(f"❌ Пользователь НЕ НАЙДЕН")
         return None
         
     except Exception as e:
         db.rollback()
-        print(f"❌ ОШИБКА поиска: {e}")
         logger.error(f"❌ ОШИБКА поиска: {e}")
         return None
     finally:
         db.close()
         
 async def safe_save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):
-    """ЭКСТРЕННО ИСПРАВЛЕННАЯ функция сохранения"""
+    """ИСПРАВЛЕННАЯ функция сохранения с правильным определением telegram_id"""
     
     # ПРОВЕРЯЕМ входящий telegram_id
     if not isinstance(telegram_id, int):
@@ -506,10 +565,20 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
         logger.error(f"❌ Некорректный telegram_id: {telegram_id}")
         raise ValueError(f"telegram_id должен быть положительным числом, получен {telegram_id}")
     
+    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: это message_id или user_id?
+    def is_likely_user_id(user_id: int) -> bool:
+        """Проверяет, является ли ID telegram_id пользователя"""
+        return 100000 <= user_id <= 9999999999
+    
+    if not is_likely_user_id(telegram_id):
+        logger.error(f"❌ ПОДОЗРИТЕЛЬНЫЙ telegram_id: {telegram_id} - возможно это message_id!")
+        # В этом случае нужно получить правильный user_id из контекста
+        raise ValueError(f"Подозрительный telegram_id: {telegram_id}. Проверьте, что передается from_user.id, а не message_id")
+    
     print("=" * 80)
-    print("💾 ЭКСТРЕННОЕ СОХРАНЕНИЕ В БД")
+    print("💾 ИСПРАВЛЕННОЕ СОХРАНЕНИЕ В БД")
     print(f"💾 ВХОДЯЩИЙ telegram_id: {telegram_id}")
-    print(f"💾 type(telegram_id): {type(telegram_id)}")
+    print(f"💾 Проверка user_id: {is_likely_user_id(telegram_id)}")
     print(f"💾 name: {name}")
     print(f"💾 email: {email}")
     print(f"💾 phone: {phone}")
@@ -520,24 +589,17 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
         try:
             current_time = datetime.now()
             
-            print(f"🔍 ВНУТРИ _save(): telegram_id = {telegram_id}")
-            logger.info(f"🔍 ВНУТРИ _save(): telegram_id = {telegram_id}")
+            logger.info(f"🔍 ИСПРАВЛЕННОЕ сохранение для telegram_id = {telegram_id}")
             
-            # ПОИСК существующего пользователя с ДЕТАЛЬНЫМ логированием
+            # ПОИСК с исправленной логикой
             existing_user = find_existing_user_safe(telegram_id, email, phone)
             
             if existing_user:
-                print(f"✅ Найден существующий пользователь:")
-                print(f"   ID в БД: {existing_user.id}")
-                print(f"   СТАРЫЙ telegram_id: {existing_user.telegram_id}")
-                print(f"   УСТАНАВЛИВАЮ НА: {telegram_id}")
+                logger.info(f"✅ Найден существующий пользователь:")
+                logger.info(f"   ID в БД: {existing_user.id}")
+                logger.info(f"   ФИНАЛЬНЫЙ telegram_id: {existing_user.telegram_id}")
                 
-                # ПРИНУДИТЕЛЬНО устанавливаем правильный telegram_id
-                existing_user.telegram_id = telegram_id
-                
-                print(f"   ПОСЛЕ УСТАНОВКИ: {existing_user.telegram_id}")
-                
-                # Обновляем остальные данные
+                # Обновляем данные (НЕ меняем telegram_id - он уже правильный)
                 if name and name != f"User_{telegram_id}":
                     existing_user.name = name
                 if email and email != f"user_{telegram_id}@bot.com":
@@ -551,7 +613,7 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
                 user = existing_user
                 
             else:
-                print(f"🆕 СОЗДАЮ НОВОГО пользователя с telegram_id: {telegram_id}")
+                logger.info(f"🆕 СОЗДАЮ НОВОГО пользователя с telegram_id: {telegram_id}")
                 
                 user = User(
                     telegram_id=telegram_id,
@@ -567,41 +629,37 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
                     last_activity=current_time
                 )
                 db.add(user)
-                
-                print(f"   СОЗДАН объект с telegram_id: {user.telegram_id}")
             
-            # ОКОНЧАТЕЛЬНАЯ ПРОВЕРКА ПЕРЕД COMMIT
-            print(f"🔍 ПЕРЕД COMMIT:")
-            print(f"   user.telegram_id: {user.telegram_id}")
-            print(f"   ожидаемый: {telegram_id}")
-            print(f"   равны? {user.telegram_id == telegram_id}")
-            
-            if user.telegram_id != telegram_id:
-                raise Exception(f"КРИТИЧЕСКАЯ ОШИБКА: telegram_id изменился! {user.telegram_id} != {telegram_id}")
+            # ФИНАЛЬНАЯ ПРОВЕРКА
+            logger.info(f"🔍 ПЕРЕД COMMIT:")
+            logger.info(f"   user.telegram_id: {user.telegram_id}")
+            logger.info(f"   ожидаемый: {telegram_id}")
+            logger.info(f"   корректность: {is_likely_user_id(user.telegram_id)}")
             
             # Логируем операцию
             log_entry = ActivityLog(
-                telegram_id=telegram_id,
-                action="user_saved_emergency",
+                telegram_id=user.telegram_id,  # Используем финальный правильный ID
+                action="user_saved_fixed",
                 details=json.dumps({
-                    "method": "emergency_save",
+                    "method": "fixed_save",
                     "input_telegram_id": telegram_id,
-                    "final_telegram_id": user.telegram_id
+                    "final_telegram_id": user.telegram_id,
+                    "is_user_id": is_likely_user_id(user.telegram_id)
                 }, ensure_ascii=False),
-                step="emergency_registration"
+                step="fixed_registration"
             )
             db.add(log_entry)
             
-            print("🔍 ВЫПОЛНЯЮ COMMIT...")
+            logger.info("🔍 ВЫПОЛНЯЮ COMMIT...")
             db.commit()
-            print("✅ COMMIT ВЫПОЛНЕН")
+            logger.info("✅ COMMIT ВЫПОЛНЕН")
             
             # ФИНАЛЬНАЯ ВЕРИФИКАЦИЯ
-            verification = db.query(User).filter(User.telegram_id == telegram_id).first()
+            verification = db.query(User).filter(User.telegram_id == user.telegram_id).first()
             if verification:
-                print(f"✅ ВЕРИФИКАЦИЯ УСПЕШНА:")
-                print(f"   ID в БД: {verification.id}")
-                print(f"   telegram_id: {verification.telegram_id}")
+                logger.info(f"✅ ВЕРИФИКАЦИЯ УСПЕШНА:")
+                logger.info(f"   ID в БД: {verification.id}")
+                logger.info(f"   telegram_id: {verification.telegram_id}")
                 
                 return {
                     'user_id': verification.id,
@@ -609,17 +667,10 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
                     'success': True
                 }
             else:
-                # Если не найден - ищем всех пользователей
-                all_users = db.query(User).all()
-                print(f"❌ ВЕРИФИКАЦИЯ ПРОВАЛЕНА! Все пользователи в БД:")
-                for u in all_users[-3:]:
-                    print(f"   ID: {u.id}, telegram_id: {u.telegram_id}, name: {u.name}")
-                
-                raise Exception(f"Пользователь с telegram_id={telegram_id} не найден после сохранения!")
+                raise Exception(f"Пользователь с telegram_id={user.telegram_id} не найден после сохранения!")
             
         except Exception as e:
             db.rollback()
-            print(f"❌ ОШИБКА: {e}")
             logger.error(f"❌ ОШИБКА: {e}")
             raise e
         finally:
@@ -627,6 +678,7 @@ async def safe_save_user_data(telegram_id: int, name: str = None, email: str = N
     
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _save)
+
 
 
 async def save_user_data(telegram_id: int, name: str = None, email: str = None, phone: str = None):

@@ -869,41 +869,40 @@ async def handle_email(message: Message, state: FSMContext):
     await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     await state.set_state(UserStates.waiting_phone)
 
-@router.message(StateFilter(UserStates.waiting_phone))
 async def handle_phone(message: Message, state: FSMContext):
-    """ЭКСТРЕННОЕ ИСПРАВЛЕНИЕ - правильный telegram_id"""
+    """ИСПРАВЛЕННЫЙ обработчик телефона с правильным telegram_id"""
     
-    # КРИТИЧЕСКИ ВАЖНО: ТОЛЬКО из message.from_user.id
-    CORRECT_TELEGRAM_ID = message.from_user.id
+    # КРИТИЧЕСКИ ВАЖНО: ТОЛЬКО from_user.id - это настоящий telegram_id
+    REAL_USER_ID = message.from_user.id
     
     print("=" * 80)
-    print("🚨 ЭКСТРЕННАЯ ОТЛАДКА TELEGRAM_ID")
-    print(f"✅ ПРАВИЛЬНЫЙ telegram_id: {CORRECT_TELEGRAM_ID}")
+    print("🚨 ИСПРАВЛЕННАЯ ОБРАБОТКА ТЕЛЕФОНА")
+    print(f"✅ НАСТОЯЩИЙ user_id: {REAL_USER_ID}")
     print(f"📱 from_user.id: {message.from_user.id}")
     print(f"💬 chat.id: {message.chat.id}")
-    print(f"👤 username: {message.from_user.username}")
+    print(f"📝 message_id: {message.message_id}")
     print("=" * 80)
     
-    logger.info("=" * 80)
-    logger.info("🚨 ЭКСТРЕННАЯ ОТЛАДКА TELEGRAM_ID")
-    logger.info(f"✅ ПРАВИЛЬНЫЙ telegram_id: {CORRECT_TELEGRAM_ID}")
-    logger.info(f"📱 from_user.id: {message.from_user.id}")
-    logger.info(f"💬 chat.id: {message.chat.id}")
-    logger.info("=" * 80)
+    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА
+    if REAL_USER_ID != message.from_user.id:
+        logger.error("КРИТИЧЕСКАЯ ОШИБКА: from_user.id изменился!")
+        return
     
-    await log_user_interaction(CORRECT_TELEGRAM_ID, "phone_processing")
+    # Проверяем, что это разумный user_id
+    if not (100000 <= REAL_USER_ID <= 9999999999):
+        logger.error(f"ПОДОЗРИТЕЛЬНЫЙ user_id: {REAL_USER_ID}")
+        await message.answer("❌ Ошибка идентификации пользователя. Попробуйте /start")
+        return
+    
+    await log_user_interaction(REAL_USER_ID, "phone_processing_fixed")
     
     # Проверяем контакт
     if message.contact:
         phone = message.contact.phone_number
         
         # КРИТИЧЕСКАЯ ПРОВЕРКА: contact.user_id должен совпадать с from_user.id
-        print(f"🔍 contact.user_id: {message.contact.user_id}")
-        print(f"🔍 from_user.id: {message.from_user.id}")
-        print(f"🔍 Совпадают? {message.contact.user_id == message.from_user.id}")
-        
-        if message.contact.user_id != CORRECT_TELEGRAM_ID:
-            print(f"❌ НЕСООТВЕТСТВИЕ! contact.user_id={message.contact.user_id}, from_user.id={CORRECT_TELEGRAM_ID}")
+        if message.contact.user_id != REAL_USER_ID:
+            logger.error(f"❌ НЕСООТВЕТСТВИЕ! contact.user_id={message.contact.user_id}, from_user.id={REAL_USER_ID}")
             await message.answer("❌ Пожалуйста, отправьте свой собственный номер телефона.")
             return
     else:
@@ -915,26 +914,25 @@ async def handle_phone(message: Message, state: FSMContext):
     
     # Получаем данные из состояния
     data = await state.get_data()
-    name = data.get('name', f'Пользователь_{CORRECT_TELEGRAM_ID}')
-    email = data.get('email', f'user_{CORRECT_TELEGRAM_ID}@bot.com')
+    name = data.get('name', f'Пользователь_{REAL_USER_ID}')
+    email = data.get('email', f'user_{REAL_USER_ID}@bot.com')
     
-    print(f"🔍 Данные для сохранения:")
-    print(f"   telegram_id: {CORRECT_TELEGRAM_ID}")
-    print(f"   name: {name}")
-    print(f"   email: {email}")
-    print(f"   phone: {phone}")
+    logger.info(f"🔍 ИСПРАВЛЕННЫЕ данные для сохранения:")
+    logger.info(f"   telegram_id: {REAL_USER_ID}")
+    logger.info(f"   name: {name}")
+    logger.info(f"   email: {email}")
+    logger.info(f"   phone: {phone}")
     
     try:
-        # ИСПОЛЬЗУЕМ ТОЛЬКО ПРАВИЛЬНЫЙ ID
+        # ИСПОЛЬЗУЕМ ИСПРАВЛЕННУЮ ФУНКЦИЮ
         save_result = await safe_save_user_data(
-            telegram_id=CORRECT_TELEGRAM_ID,  # ТОЛЬКО ПРАВИЛЬНЫЙ ID
+            telegram_id=REAL_USER_ID,  # ТОЛЬКО НАСТОЯЩИЙ ID
             name=name,
             email=email,
             phone=phone
         )
         
-        print(f"✅ Результат сохранения: {save_result}")
-        logger.info(f"✅ Результат сохранения: {save_result}")
+        logger.info(f"✅ ИСПРАВЛЕННЫЙ результат сохранения: {save_result}")
         
         if save_result['success']:
             success_message = "✅ Отлично! Регистрация завершена!"
@@ -944,8 +942,7 @@ async def handle_phone(message: Message, state: FSMContext):
         await message.answer(success_message)
         
     except Exception as e:
-        print(f"❌ ОШИБКА сохранения: {e}")
-        logger.error(f"❌ ОШИБКА сохранения: {e}")
+        logger.error(f"❌ ОШИБКА исправленного сохранения: {e}")
         await message.answer("✅ Данные получены! Продолжаем...")
     
     # Переход к опросу
